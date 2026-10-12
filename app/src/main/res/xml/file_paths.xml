@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Only the automation export staging dir is shared. Nothing else in
+        cache (targets, icons, bugle db, messages) must be exposed. -->
+    <cache-path name="automation-exports" path="automation-exports/" />
+</paths>

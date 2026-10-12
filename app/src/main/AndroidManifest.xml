@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.WRITE_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_MMS" />
+    <uses-permission android:name="android.permission.RECEIVE_WAP_PUSH" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <!-- Needed for self-number detection used to filter self-addressed MMS and
+        associate threads (audit A-20): DeviceManager.runOperation grants it via
+        root, but an undeclared permission can never be granted. Also runtime-
+        requestable. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.WRITE_CALL_LOG" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- A transfer is thirty gigabytes of user-visible work. Without a
+         foreground service the process is evictable, and evicting it mid-pack
+         abandons the run and leaves the archive on disk. The
+         DATA_SYNC type is required from Android 14 for any typed FGS. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Root side-loaded backup tool: needs full package visibility for app lists.
+        Granted at runtime via root; not a Play release. -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission" />
+    <!-- Granted at runtime via root `pm grant` + appops (see MainViewModel.checkRootAccess). -->
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.SET_WALLPAPER" />
+    <!-- Signature-level gate for the headless automation trigger: only apps
+        signed with this key, or the root user (uid 0 passes the platform check),
+        may enqueue automation runs. Third-party apps without our signature are
+        denied. -->
+    <permission
+        android:name="com.phoenix.droidvault.permission.TRIGGER_AUTOMATION"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.phoenix.droidvault.permission.TRIGGER_AUTOMATION" />
+
+    <application
+        android:name=".DroidVaultApp"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:enableOnBackInvokedCallback="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:theme="@style/Theme.DroidVault"
+        tools:targetApi="37">
+
+        <!-- singleTop: the ZIP deep link and the run-notification content
+             intent both target this activity. In the default "standard" launch
+             mode each delivery created a SECOND MainActivity instance, and
+             every instance builds its own MainViewModel — a duplicated root
+             probe, a duplicated engine deploy, and a second copy of the wizard
+             state stacked on the first. singleTop routes a delivery while the
+             task is already at the top to onNewIntent instead, which is what
+             MainActivity already implements. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.DroidVault"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Automation export sharing (scoped-storage safe: private cache + grant). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="com.phoenix.droidvault.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Runs export/import as foreground work so a backgrounded app is not
+             evicted mid-transfer. Not exported: only this app starts it. -->
+        <service
+            android:name=".utils.TransferService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Cancel action for scheduled-run progress notifications. NOT
+            exported: only our own PendingIntents can target it. -->
+        <receiver
+            android:name=".utils.RunCancelReceiver"
+            android:exported="false" />
+
+        <!-- Confirm action for the SMS-handback card. NOT exported: only our
+            own notification's PendingIntent can target it. -->
+        <receiver
+            android:name=".utils.SmsHandbackReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".utils.SmsReceiver"
+            android:permission="android.permission.BROADCAST_SMS"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_DELIVER" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".utils.MmsReceiver"
+            android:permission="android.permission.BROADCAST_WAP_PUSH"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.WAP_PUSH_DELIVER" />
+                <data android:mimeType="application/vnd.wap.mms-message" />
+            </intent-filter>
+        </receiver>
+
+        <activity
+            android:name=".utils.ComposeSmsActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SENDTO" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".utils.HeadlessSmsSendService"
+            android:permission="android.permission.SEND_RESPOND_VIA_MESSAGE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.RESPOND_VIA_MESSAGE" />
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:scheme="sms" />
+                <data android:scheme="smsto" />
+                <data android:scheme="mms" />
+                <data android:scheme="mmsto" />
+            </intent-filter>
+        </service>
+
+        <activity
+            android:name=".ScheduleTriggerActivity"
+            android:exported="true"
+            android:permission="com.phoenix.droidvault.permission.TRIGGER_AUTOMATION"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="" />
+
+        <activity
+            android:name=".ExternalInstallerActivity"
+            android:label="Install Apps"
+            android:exported="true"
+            android:theme="@style/Theme.DroidVault.Installer"
+            android:excludeFromRecents="true"
+            android:taskAffinity="">
+
+            <intent-filter
+                android:label="Install Apps">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.INSTALL_PACKAGE" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+            </intent-filter>
+
+            <intent-filter
+                android:label="Install Apps">
+                <action android:name="android.intent.action.VIEW" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:mimeType="*/*" />
+                <data android:pathSuffix=".apk" />
+            </intent-filter>
+
+            <intent-filter
+                android:label="Install Apps">
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/vnd.android.package-archive" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

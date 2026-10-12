@@ -1,0 +1,15 @@
+[package]
+name = "droidvault-engine"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "droidvault-engine"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
