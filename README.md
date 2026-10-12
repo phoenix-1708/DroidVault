@@ -328,10 +328,15 @@ keyAlias=...
 keyPassword=...
 ```
 
-The CI equivalents are `KEYSTORE_FILE`, `KEYSTORE_PASSWORD`, `KEYSTORE_ALIAS`
-and `KEY_PASSWORD`. If no key is found, the release build falls back to the
-**debug key** and prints a loud warning — such a build **cannot** update a
-release-signed install and must not be distributed.
+In CI the key arrives as four repository **secrets** — `KEYSTORE_BASE64`,
+`KEYSTORE_PASSWORD`, `KEYSTORE_ALIAS` and `KEY_PASSWORD` — listed in
+[`docs/SETUP.md`](docs/SETUP.md). The workflow decodes the base64 blob to a
+temporary path and points the build at it with `KEYSTORE_FILE`, which is an
+internal variable it sets itself, not a secret you create.
+
+If no key is found, the release build falls back to the **debug key** and prints
+a loud warning — such a build **cannot** update a release-signed install and
+must not be distributed.
 
 </details>
 
