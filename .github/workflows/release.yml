@@ -98,10 +98,16 @@ jobs:
           fi
           echo "sdkmanager: $SDKMANAGER"
 
+          # `yes |` writes a broken-pipe warning on exit; the licences are
+          # already accepted on the runner image, so this is belt-and-braces.
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null 2>&1 || true
           "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install \
             "platform-tools" \
-            "platforms;android-37" \
+            # ".0" suffix is required: Google publishes `platforms;android-37.0`,
+            # and plain `android-37` fails with "Failed to find package". The
+            # local SDK has it as `android-37.0` too, which is why the same
+            # compileSdk = 37 resolves fine on a developer machine.
+            "platforms;android-37.0" \
             "build-tools;37.0.0" \
             "ndk;29.0.14206865"
 
