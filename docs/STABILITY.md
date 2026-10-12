@@ -30,14 +30,14 @@ switches calling `MainViewModel.setFastInstallAllowed/setSsaidRestoreAllowed/set
 
 ## Phase B done
 - Dead deps removed: `graphics-path`, `ksp`/`serialization` plugin aliases. `icons-extended` KEPT — compiler-verified: most `Icons.Default.*` used (Storage, Palette, SystemUpdate, DeleteSweep, …) resolve from the extended artifact in this BOM. Coil 2.7.0 kept intentionally (see below).
-- `versionCode`: static bump per release (GitHub CI / tag machinery removed; project is GitHub-independent).
+- `versionCode`: static bump per release, verified against the engine version gate in `BackendInstaller`. Releases are built by GitHub Actions on a `v*` tag — see [SETUP.md](SETUP.md).
 
-## Next split (in progress)
-- `PrefsRepo`, `FlashOps` created.
-- `MainViewModel` keeps API; new code uses `prefsRepo`. Full move of remaining bodies is TODO (mechanical).
+## Split in progress
+- `FlashOps` created — a validated facade over `FlashManager` and the shell.
+- Preferences are still read directly from `SharedPreferences` at the call sites; there is no repository layer to migrate to.
 
 ## Release checklist
-- [ ] `ANDROID_HOME` build: `bash gradlew lintDebug testDebugUnitTest assembleRelease`
+- [ ] Tests pass: `sh gradlew testDebugUnitTest` and `cd engine && cargo test`
 - [ ] Bump `versionCode` in `app/build.gradle.kts` on every release (backend engine version gate in `BackendInstaller` compares it).
 - [ ] Coil2 (`io.coil-kt:coil-compose:2.7.0`) kept intentionally; Coil3 migration (`io.coil-kt.coil3:coil-compose:3.6.x`, `coil.compose` -> `coil3.compose`) is a separate UI-regression task.
-- [ ] Version `1.6.7-eevee`, static versionCode. `libsu 6.0.0` via JitPack: pin commit SHA + dependency verification before stable.
+- [ ] `libsu 6.0.0` resolves through JitPack (see `settings.gradle.kts`): pin a commit SHA and enable dependency verification before calling the dependency set stable.

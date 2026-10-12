@@ -32,9 +32,14 @@ archive in the vault is a zstd stream written by it.
 |---|---|---|
 | [Jetpack Compose](https://developer.android.com/jetpack/compose) | UI toolkit | Apache-2.0 |
 | [libsu](https://github.com/topjohnwu/libsu) | root shell access | Apache-2.0 |
-| [kotlinx.serialization](https://github.com/Kotlin/kotlinx.serialization) | automation state encoding | Apache-2.0 |
 | [WorkManager](https://developer.android.com/topic/libraries/architecture/workmanager) | scheduled runs | Apache-2.0 |
+| [kotlinx.coroutines](https://github.com/Kotlin/kotlinx.coroutines) | async work | Apache-2.0 |
+| [Coil](https://github.com/coil-kt/coil) | image loading in the UI | Apache-2.0 |
+| [org.json](https://github.com/stleary/JSON-java) | automation state encoding | Public domain |
 | [Rust](https://www.rust-lang.org) + Android NDK | build-time only | MIT / Apache-2.0 |
+
+Automation state is JSON in `SharedPreferences`, written with `org.json` —
+this project does **not** use `kotlinx.serialization`.
 
 ---
 
