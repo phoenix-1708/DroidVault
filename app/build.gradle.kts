@@ -5,14 +5,23 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-// Release signing: keystore.properties at the repo root (gitignored) wins;
-// KEYSTORE_PASSWORD env is the CI fallback. Without either, release falls
-// back to the debug key and the P5 warning below makes that LOUD.
+// Release signing, in priority order:
+//   1. keystore.properties at the repo root (gitignored) — local builds
+//   2. KEYSTORE_* environment variables — CI, where the key is a secret and
+//      never touches the working tree
+// Without either, release falls back to the debug key and the warning below
+// makes that LOUD rather than producing a silently unsigned artifact.
+//
+// The environment path exists because a CI release cannot have a keystore on
+// disk, and writing one to disk during a build is what puts the signing key
+// where a later step — a test, a cache write, a crash dump — can pick it up.
 val keystoreProps = Properties().apply {
     val f = rootProject.file("keystore.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
-val hasReleaseKeystore = keystoreProps.getProperty("storeFile") != null
+val envStoreFile = System.getenv("KEYSTORE_FILE")
+val hasReleaseKeystore =
+    keystoreProps.getProperty("storeFile") != null || envStoreFile != null
 
 android {
     namespace = "com.phoenix.droidvault"
@@ -593,6 +602,19 @@ android {
         // past 100% to 97% disk. engine/src/transfer.rs now packs, extracts with
         // measured percentages, and places by rename; Cancel exists in every
         // phase. Verified: 107-app import, export cancel, 4.2 GB round trip.
+        // 1.0.0 (300015) — first public release.
+        //
+        // versionName is 1.0.0 — the first public release. versionCode stays
+        // high on purpose: it is an opaque install-ordering number nobody sees,
+        // while 3.x builds are ALREADY sideloaded onto a test device. Code 1
+        // would be a DOWNGRADE there — Android refuses to install over a higher
+        // code without `adb install -d`, and uninstalling first instead drops
+        // Magisk's per-UID grant and every app preference. A high code installs
+        // cleanly everywhere, so the release is testable with neither footgun.
+        // The per-ABI release APKs are produced by ABI splits: one APK per
+        // architecture, each carrying only its own engine. A single universal
+        // APK shipped all four ABIs, so a phone downloaded an engine for x86 it
+        // would never run.
         // 3.6.3 (300014) — signing hygiene, grammar, and a tab that says what it does.
         //  - Added a build-failing guard: signing material must never be staged
         //    for commit. Verified by force-staging the keystore, which failed
@@ -647,17 +669,37 @@ android {
         // Verified on device: 30 GB split export 30 min -> 3m07s; import
         // ~8 min -> ~2m45s; parts, manifest and Check all verified; archives
         // written by earlier builds still import unchanged.
-        versionCode = 300014
-        versionName = "3.6.3"
+        versionCode = 300015
+        versionName = "1.0.0"
     }
 
     signingConfigs {
         create("release") {
-            if (hasReleaseKeystore) {
+            if (keystoreProps.getProperty("storeFile") != null) {
                 storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
+            } else if (envStoreFile != null) {
+                storeFile = file(envStoreFile)
+                storePassword = System.getenv("KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("KEYSTORE_ALIAS")
+                keyPassword = System.getenv("KEY_PASSWORD")
+                // isNullOrBlank, NOT `== null`: a GitHub secret that is set but
+                // empty arrives as "" and reads as present, so a null check passes
+                // and signing proceeds with blank credentials — failing later,
+                // inside the signing task, with an error about the keystore
+                // rather than about the missing secret.
+                if (storePassword.isNullOrBlank() || keyAlias.isNullOrBlank() ||
+                    keyPassword.isNullOrBlank()
+                ) {
+                    throw GradleException(
+                        "KEYSTORE_FILE is set but KEYSTORE_PASSWORD / KEYSTORE_ALIAS / " +
+                            "KEY_PASSWORD are not. Refusing to build: a half-configured " +
+                            "release key would either fail obscurely or fall back to the " +
+                            "debug key and ship an APK that cannot update a real install."
+                    )
+                }
             } else {
                 initWith(getByName("debug"))
             }
@@ -668,11 +710,11 @@ android {
     // "release" APK cannot update an installed release-signed build and must
     // never be distributed as one.
     tasks.matching { it.name == "assembleRelease" }.configureEach {
-        val properlySigned = hasReleaseKeystore || System.getenv("KEYSTORE_PASSWORD") != null
+        val properlySigned = hasReleaseKeystore
         doLast {
             if (!properlySigned) {
                 logger.warn(
-                    "⚠️  assembleRelease is DEBUG-SIGNED (no keystore.properties or KEYSTORE_PASSWORD env). " +
+                    "⚠️  assembleRelease is DEBUG-SIGNED (no keystore.properties, no KEYSTORE_* env). " +
                         "Do NOT ship this APK; use it for local testing only."
                 )
             }
@@ -693,7 +735,7 @@ android {
 
     splits {
         abi {
-            isEnable = false
+            isEnable = true
             reset()
             isUniversalApk = false
             include("armeabi-v7a", "arm64-v8a")

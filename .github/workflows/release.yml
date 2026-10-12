@@ -1,0 +1,223 @@
+# Builds the release APKs and publishes them to a GitHub Release.
+#
+# Triggered by pushing a `v*` tag, so the tag is the single source of truth for
+# what gets built. Creating a release by hand is how a version gets built twice,
+# or built at a different commit than the tag says.
+#
+# ── Signing ──────────────────────────────────────────────────────────────────
+# The keystore is NOT in this repository, and must never be: a repo that ships
+# its own signing key ships the ability to sign an update the platform accepts
+# as the real app. It comes from repository secrets instead:
+#
+#   KEYSTORE_BASE64  base64 of the .jks file   (base64 -w0 keystore/….jks)
+#   KEYSTORE_PASSWORD
+#   KEYSTORE_ALIAS
+#   KEY_PASSWORD
+#
+# See SETUP.md in docs/ for how to create them.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish'
+        required: true
+
+permissions:
+  contents: write   # create the release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false   # never cancel a half-finished signed release
+
+env:
+  GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx3g
+
+jobs:
+  build:
+    name: Build release APKs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+            # Refuse to build a tag that does not exist: a typo here would
+            # otherwise publish a release pointing at a 404.
+            git fetch --depth=1 origin "refs/tags/$TAG"
+            git checkout -q "FETCH_HEAD"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building $TAG ($(git rev-parse --short HEAD))"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform, build tools and NDK
+        # The Rust engine is cross-compiled by the build, so the NDK is not
+        # optional here. The version is pinned rather than "latest" so a runner
+        # image update cannot change what a given tag produces.
+        run: |
+          sdkmanager --install \
+            "platforms;android-37" \
+            "build-tools;37.0.0" \
+            "ndk;29.0.14206865"
+
+      - name: Cache the cargo registry and target dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('engine/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Restore the release keystore
+        id: keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "::error::KEYSTORE_BASE64 is not set. Without it the build " \
+                 "would fall back to the DEBUG key and publish an APK that " \
+                 "cannot update a real install. See docs/SETUP.md."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/keystore"
+          # base64 -d, not `openssl base64`: the two differ on whitespace, and
+          # a keystore that fails to decode here fails obscurely at signing.
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/keystore/release.jks"
+          test -s "$RUNNER_TEMP/keystore/release.jks" || {
+            echo "::error::keystore decoded to zero bytes — the secret is not a base64 .jks"
+            exit 1
+          }
+          echo "key_path=$RUNNER_TEMP/keystore/release.jks" >> "$GITHUB_OUTPUT"
+
+      - name: Unit tests
+        run: sh gradlew testDebugUnitTest --no-daemon
+
+      - name: Rust tests
+        working-directory: engine
+        run: |
+          cargo test
+          cargo fmt --check
+
+      - name: Build split release APKs
+        env:
+          KEYSTORE_FILE: ${{ steps.keystore.outputs.key_path }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: sh gradlew assembleRelease --no-daemon
+
+      - name: Collect and check the APKs
+        id: collect
+        run: |
+          mkdir -p dist
+          shopt -s nullglob
+          found=0
+          for f in app/build/outputs/apk/release/*-release.apk; do
+            abi=$(basename "$f" | sed -E 's/^app-(.*)-release\.apk$/\1/')
+            # Named as the user downloads it: <abi>-release.apk
+            out="dist/${abi}-release.apk"
+            cp "$f" "$out"
+            found=$((found+1))
+            echo "  ${abi}-release.apk  $(stat -c%s "$out") bytes"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no release APKs were produced"
+            exit 1
+          fi
+          echo "found=$found" >> "$GITHUB_OUTPUT"
+
+      - name: Verify each APK is release-signed and carries only its own ABI
+        # A split that silently lost its native library still installs and then
+        # fails on first run, as root, on the user's phone. Assert it here.
+        run: |
+          bt=$(ls -d "$ANDROID_SDK_ROOT"/build-tools/* | sort -V | tail -1)
+          for apk in dist/*.apk; do
+            name=$(basename "$apk")
+            want=$(echo "$name" | sed -E 's/^(.*)-release\.apk$/\1/')
+            if unzip -l "$apk" | grep -q 'Android Debug'; then
+              echo "::error::$name is signed with the DEBUG key — refusing to publish"
+              exit 1
+            fi
+            sig=$("$bt"/apksigner verify --print-certs "$apk" 2>/dev/null | grep -m1 'certificate DN' || true)
+            echo "  $name  $sig"
+            abis=$(unzip -l "$apk" | awk '/lib\//{print $4}' | cut -d/ -f2 | sort -u)
+            if [ "$abis" != "$want" ]; then
+              echo "::error::$name contains [$abis] but is named for $want"
+              exit 1
+            fi
+            unzip -l "$apk" | grep -q "lib/$want/libzapdos.so" || {
+              echo "::error::$name is missing libzapdos.so for $want"
+              exit 1
+            }
+            unzip -l "$apk" | grep -q "lib/$want/libdroidvault_engine.so" || {
+              echo "::error::$name is missing libdroidvault_engine.so for $want"
+              exit 1
+            }
+            echo "    ABI, zapdos and engine all correct"
+          done
+
+      - name: Upload APKs as workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apks
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          body=$(mktemp)
+          {
+            echo "First public release of Droid Vault."
+            echo
+            echo "Choose the APK for your phone:"
+            echo
+            echo "| File | For |"
+            echo "|---|---|"
+            echo "| \`arm64-v8a-release.apk\` | Most modern phones (2017 and newer) |"
+            echo "| \`armeabi-v7a-release.apk\` | Older 32-bit devices |"
+            echo
+            echo "**Requirements:** rooted device (Magisk, KernelSU or APatch), Android 10+."
+            echo
+            echo "**This is a work in progress and it is vibe coded** — one device, one"
+            echo "person, one ROM. Not audited, not production-ready. Keep an independent"
+            echo "backup. See the Disclaimer section of the README."
+            echo
+            echo "Based on ROM Shifter by ShivamXD6 and the Build Bytes team (GPL-3.0)."
+          } > "$body"
+          # --clobber so re-running a failed run replaces the assets rather
+          # than erroring on files that already exist.
+          gh release create "$TAG" dist/*.apk \
+            --title "Droid Vault $TAG" \
+            --notes-file "$body" \
+            --clobber
+          echo "Published release $TAG"

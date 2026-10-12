@@ -5,7 +5,7 @@
   <p><b>Offline, root-based backup, restore and ROM migration for Android.</b></p>
 
   [![Author](https://img.shields.io/badge/Author-phoenix--1708-blue?style=for-the-badge)]()
-  [![Version](https://img.shields.io/badge/version-3.6.3-informational?style=for-the-badge)]()
+  [![Version](https://img.shields.io/badge/version-1.0.0-informational?style=for-the-badge)]()
   ![Android](https://img.shields.io/badge/Android-3DDC84?style=for-the-badge&logo=android&logoColor=white)
   ![Root](https://img.shields.io/badge/Root-ff0000?style=for-the-badge&logo=superuser&logoColor=white)
   ![Magisk](https://img.shields.io/badge/Magisk-8A2BE2?style=for-the-badge&logo=magisk&logoColor=white)
@@ -152,9 +152,11 @@ past it since.
 
 ## 📥 Installation
 
-1. **Sideload the APK.** Obtain a build from the
-   [releases page](https://github.com/phoenix-1708/DroidVault/releases), or build
-   it yourself with the instructions below. There is no Play Store listing.
+1. **Sideload the APK.** Grab it from the
+   [releases page](https://github.com/phoenix-1708/DroidVault/releases) and pick the
+   file for your device: `arm64-v8a-release.apk` for most modern phones,
+   `armeabi-v7a-release.apk` for older 32-bit devices. There is no Play Store
+   listing.
 2. **Open the app** and grant root access when prompted.
 3. **Complete the setup wizard** and choose your vault folder — by default
    `/storage/emulated/0/DroidVault`.
@@ -208,7 +210,7 @@ export ANDROID_NDK_HOME=/path/to/android-ndk
 ```sh
 sh gradlew testDebugUnitTest     # unit tests
 sh gradlew assembleDebug         # debug APK
-sh gradlew assembleRelease       # release APK (R8 + resource shrinking)
+sh gradlew assembleRelease       # release APKs, one per ABI (R8 + shrinking)
 cd engine && cargo test && cargo fmt --check && cd ..
 ```
 
@@ -220,9 +222,17 @@ Outputs:
 | Artifact | Path |
 |---|---|
 | Debug APK | `app/build/outputs/apk/debug/app-debug.apk` |
-| Release APK | `app/build/outputs/apk/release/app-release.apk` |
+| Release APKs | `app/build/outputs/apk/release/app-<abi>-release.apk` |
 
-### 4. Signing a release
+Release builds are split per ABI (`arm64-v8a`, `armeabi-v7a`), each carrying
+only its own engine.
+
+### 4. Publishing a release
+
+Pushing a `v*` tag builds and publishes both APKs to a GitHub Release — see
+[docs/SETUP.md](docs/SETUP.md) for the one-time secrets setup.
+
+### 5. Signing a local release
 
 Release signing reads `keystore.properties` at the repository root, falling back
 to the `KEYSTORE_PASSWORD` environment variable. **Neither is committed, and
