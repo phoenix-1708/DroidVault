@@ -71,36 +71,44 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # The runner image already ships the SDK, cmdline-tools and the NDK.
-      # `android-actions/setup-android` was removed from this workflow on the
-      # first run: it shells out to `sdkmanager tools`, a package that no
-      # longer exists in current cmdline-tools, so the action itself failed
-      # before the build started. Installing what is missing directly is both
-      # fewer moving parts and one fewer place for the runner image to break.
+      # The Rust engine is cross-compiled, so an NDK is required. The runner
+      # image already carries the SDK and cmdline-tools, but two things had to
+      # be learned the hard way on the first CI runs:
+      #
+      #  - `android-actions/setup-android` runs `sdkmanager tools`, a package
+      #    that no longer exists, so the action itself failed.
+      #  - cmdline-tools is NOT on PATH, and the image's own layout is not
+      #    guaranteed. So rather than guess a path that changes with the image,
+      #    this searches the well-known locations and installs what is missing.
       - name: Install SDK platform, build tools and NDK
-        # The Rust engine is cross-compiled by the build, so the NDK is not
-        # optional here. The version is pinned rather than "latest" so a runner
-        # image update cannot change what a given tag produces.
         run: |
           set -euo pipefail
-          # The runner image ships cmdline-tools but does NOT put it on PATH;
-          # `sdkmanager` resolves to "command not found". Derive it from the SDK
-          # root instead of assuming a PATH entry that changes with the image.
-          SDKMANAGER="$(ls -d "$ANDROID_SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1)"
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "SDK root: $SDK_ROOT"
+          SDKMANAGER=""
+          for candidate in             "$SDK_ROOT"/cmdline-tools/*/bin/sdkmanager             "$SDK_ROOT"/cmdline-tools/latest/bin/sdkmanager             /usr/local/lib/android/sdk/cmdline-tools/*/bin/sdkmanager             /usr/lib/android-sdk/cmdline-tools/*/bin/sdkmanager             "$(command -v sdkmanager 2>/dev/null || true)"
+          do
+            [ -n "$candidate" ] && [ -x "$candidate" ] && { SDKMANAGER="$candidate"; break; }
+          done
           if [ -z "$SDKMANAGER" ]; then
-            echo "::error::no sdkmanager under $ANDROID_SDK_ROOT/cmdline-tools"
+            echo "::error::no usable sdkmanager found"
+            echo "Contents of $SDK_ROOT:"
+            ls -la "$SDK_ROOT" || true
             exit 1
           fi
-          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null 2>&1 <<< "y" || true
-          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --install \
+          echo "sdkmanager: $SDKMANAGER"
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install \
             "platform-tools" \
             "platforms;android-37" \
             "build-tools;37.0.0" \
             "ndk;29.0.14206865"
-          echo "sdkmanager: $SDKMANAGER"
-          # The build reads the NDK from the environment; android-actions also
-          # exported ANDROID_NDK_HOME, and removing the action removed it.
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+          # Exported for the build, and because a local build resolves the NDK
+          # from the SDK root anyway when this is absent.
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: Cache the cargo registry and target dir
         uses: actions/cache@v4
