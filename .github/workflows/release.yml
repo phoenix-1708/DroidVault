@@ -83,12 +83,21 @@ jobs:
         # image update cannot change what a given tag produces.
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager --install \
+          # The runner image ships cmdline-tools but does NOT put it on PATH;
+          # `sdkmanager` resolves to "command not found". Derive it from the SDK
+          # root instead of assuming a PATH entry that changes with the image.
+          SDKMANAGER="$(ls -d "$ANDROID_SDK_ROOT"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::no sdkmanager under $ANDROID_SDK_ROOT/cmdline-tools"
+            exit 1
+          fi
+          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses > /dev/null 2>&1 <<< "y" || true
+          "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --install \
             "platform-tools" \
             "platforms;android-37" \
             "build-tools;37.0.0" \
             "ndk;29.0.14206865"
+          echo "sdkmanager: $SDKMANAGER"
           # The build reads the NDK from the environment; android-actions also
           # exported ANDROID_NDK_HOME, and removing the action removed it.
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> "$GITHUB_ENV"

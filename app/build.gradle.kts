@@ -785,6 +785,48 @@ val rustEngineInputs = fileTree(rustEngineDir) {
  * Only the Rust engine tasks need this. `./gradlew testDebugUnitTest` does not,
  * so a contributor can run the entire test suite without an NDK installed.
  */
+val sdkRoot: String? =
+    System.getenv("ANDROID_SDK_ROOT")
+        ?: rootProject.file("local.properties").takeIf { it.isFile }
+            ?.let { propsFile ->
+                val props = Properties()
+                propsFile.inputStream().use { props.load(it) }
+                props.getProperty("sdk.dir")
+            }
+
+/** The highest-versioned NDK under the SDK root, if any. */
+/** Negative / zero / positive, ordering NDK versions by component. */
+fun compareNdkVersions(a: List<Int>, b: List<Int>): Int {
+    for (i in 0 until maxOf(a.size, b.size)) {
+        val av = a.getOrElse(i) { 0 }
+        val bv = b.getOrElse(i) { 0 }
+        if (av != bv) return av - bv
+    }
+    return 0
+}
+
+fun newestNdkInSdk(root: String?): String? {
+    if (root.isNullOrBlank()) return null
+    // Project.file(), not java.io.File: `java` is shadowed in this script, and
+    // `file(root, "ndk")` resolves to an overload that does not take a String
+    // first argument. resolve() keeps both operands Strings.
+    val ndkDir = rootProject.file(root).resolve("ndk")
+    if (!ndkDir.isDirectory) return null
+    // Version-ordered, not lexicographic: "9.0.0" sorts above "30.0.16248370"
+    // as a string, and picking that would hand the build an ancient NDK.
+    val candidates = ndkDir.listFiles()?.filter { it.isDirectory } ?: return null
+    var best: String? = null
+    var bestKey: List<Int>? = null
+    for (c in candidates) {
+        val key: List<Int> = c.name.split('.').map { it.toIntOrNull() ?: 0 }
+        if (bestKey == null || compareNdkVersions(key, bestKey) > 0) {
+            bestKey = key
+            best = c.absolutePath
+        }
+    }
+    return best
+}
+
 val ndkRoot: String = providers.gradleProperty("droidvault.ndkPath").orNull
     ?: System.getenv("ANDROID_NDK_HOME")
     ?: System.getenv("ANDROID_NDK_ROOT")
@@ -795,6 +837,10 @@ val ndkRoot: String = providers.gradleProperty("droidvault.ndkPath").orNull
             propsFile.inputStream().use { props.load(it) }
             props.getProperty("ndk.dir")
         }
+    // Last, and deliberately: a CI runner installs the NDK into the SDK root
+    // and exports nothing. Without this the engine cross-compile fails with
+    // "none was found" on a machine that plainly has one.
+    ?: newestNdkInSdk(sdkRoot)
     ?: ""
 val ndkHostBin = file(
     if (ndkRoot.isBlank()) "no-ndk-configured"
