@@ -152,6 +152,43 @@ jobs:
           }
           echo "key_path=$RUNNER_TEMP/keystore/release.jks" >> "$GITHUB_OUTPUT"
 
+      - name: Check the keystore opens with these credentials
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        # Fails in seconds, and says what is wrong. Without this the same bad
+        # secret surfaces five minutes later as a KeytoolException inside
+        # :app:packageRelease, which reads like a build problem rather than a
+        # credential one — and it only does so AFTER compiling the engine.
+        #
+        # Secrets are almost always pasted from a terminal, which drags along a
+        # trailing newline; that is the single most common cause. So the check
+        # reports WHICH secret is wrong, by length only — never the value.
+        run: |
+          set -euo pipefail
+          key="${{ steps.keystore.outputs.key_path }}"
+          alias_name="$KEYSTORE_ALIAS"
+          echo "key present : $(test -s "$key" && echo yes || echo no)"
+          echo "storepass len: ${#KEYSTORE_PASSWORD}"
+          echo "keypass len  : ${#KEY_PASSWORD}"
+          echo "alias        : $alias_name"
+
+          if ! keytool -list -keystore "$key" -storepass "$KEYSTORE_PASSWORD" > /tmp/ks.txt 2>&1; then
+            echo "::error::KEYSTORE_PASSWORD does not open this keystore."
+            echo "::error::Either the secret is wrong, or it has a trailing"
+            echo "::error::newline/space from copy-paste. Re-set it carefully."
+            sed 's/^/  keytool: /' /tmp/ks.txt
+            exit 1
+          fi
+          if ! grep -q "$alias_name" /tmp/ks.txt; then
+            echo "::error::KEYSTORE_ALIAS '$alias_name' is not in the keystore."
+            echo "::error::Aliases actually present:"
+            sed 's/^/  /' /tmp/ks.txt
+            exit 1
+          fi
+          echo "keystore opens, alias present"
+
       - name: Add the Android Rust targets
         # `preBuild` depends on the cross-compiled engine, so even the unit-test
         # task needs these targets. Without them cargo fails with
