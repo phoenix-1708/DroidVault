@@ -152,6 +152,20 @@ jobs:
           }
           echo "key_path=$RUNNER_TEMP/keystore/release.jks" >> "$GITHUB_OUTPUT"
 
+      - name: Add the Android Rust targets
+        # `preBuild` depends on the cross-compiled engine, so even the unit-test
+        # task needs these targets. Without them cargo fails with
+        # "can't find crate for `std`" — and it does so on the test step,
+        # which looks nothing like a compile problem.
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
+          rustc --version && cargo --version
+
       - name: Unit tests
         run: sh gradlew testDebugUnitTest --no-daemon
 
