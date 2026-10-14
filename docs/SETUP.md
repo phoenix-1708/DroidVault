@@ -35,9 +35,26 @@ discover a copy-paste problem.
 
 ## 2. Publishing a release
 
+Two things must be right before you tag, and only one of them fails loudly.
+
+**1. The `versionCode` must be higher than every code ever published.**
+`pm install -r` refuses a downgrade with `INSTALL_FAILED_VERSION_DOWNGRADE`, and
+the only way past that is for the user to uninstall first — dropping their
+preferences, their scheduled jobs and their root grant. Check the highest code in
+`app/build.gradle.kts` and any existing release, and go above both. This is not
+theoretical: a major-version "series" convention put 2.0.0 *below* the band 1.x
+had already published, and nobody could install it (`AUDIT.md` §2.64).
+
+**2. Write the release notes.** They live in `.github/release-notes/<tag>.md` —
+one file per release, and the workflow publishes that file verbatim as the
+release body. Write it for the person installing the app, not for whoever has to
+read the diff: what changed for them, which APK to pick, and what to do before
+upgrading. A missing file is not an error — the workflow falls back to a minimal
+body — which means forgetting it ships a near-empty release page.
+
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
 The tag is the single source of truth for what gets built, so a release cannot

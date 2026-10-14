@@ -181,8 +181,8 @@ Scheduled runs that execute **headlessly**, with the app closed.
 | **Compression** | `zapdos` — a zstd fork; see [Credits](#-credits) |
 | **Native targets** | Engine cross-compiled for `arm64-v8a`, `armeabi-v7a`, `x86_64`; release APKs are split and ship `arm64-v8a` and `armeabi-v7a` |
 
-Roughly **40k lines of Kotlin**, **4.5k of Rust**, and **572 tests**
-(529 Kotlin + 43 Rust) run on every release.
+Roughly **42k lines of Kotlin**, **9.6k of Rust**, and **788 tests**
+(664 Kotlin + 124 Rust) run on every release.
 
 ---
 

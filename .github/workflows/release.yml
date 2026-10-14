@@ -284,24 +284,29 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           body=$(mktemp)
-          {
-            echo "First public release of Droid Vault."
-            echo
-            echo "Choose the APK for your phone:"
-            echo
-            echo "| File | For |"
-            echo "|---|---|"
-            echo "| \`arm64-v8a-release.apk\` | Most modern phones (2017 and newer) |"
-            echo "| \`armeabi-v7a-release.apk\` | Older 32-bit devices |"
-            echo
-            echo "**Requirements:** rooted device (Magisk, KernelSU or APatch), Android 10+."
-            echo
-            echo "**This is a work in progress and it is vibe coded** — one device, one"
-            echo "person, one ROM. Not audited, not production-ready. Keep an independent"
-            echo "backup. See the Disclaimer section of the README."
-            echo
-            echo "Based on ROM Shifter by ShivamXD6 and the Build Bytes team (GPL-3.0)."
-          } > "$body"
+          # Release notes live in `.github/release-notes/<tag>.md` — a real
+          # changelog per release, written for the person installing the app, not
+          # for whoever has to read the diff. Hardcoding the body in this file
+          # meant every release shipped the same "First public release" text and
+          # the real notes had nowhere to live. A missing file falls back to a
+          # minimal body rather than failing the release.
+          notes=".github/release-notes/${TAG}.md"
+          if [ -f "$notes" ]; then
+            echo "Using release notes from $notes"
+            cp "$notes" "$body"
+          else
+            echo "No release notes at $notes; writing a minimal body"
+            {
+              echo "Droid Vault ${TAG}."
+              echo
+              echo "| File | For |"
+              echo "|---|---|"
+              echo "| \`app-arm64-v8a-release.apk\` | Most modern phones (2017 and newer) |"
+              echo "| \`app-armeabi-v7a-release.apk\` | Older 32-bit devices |"
+              echo
+              echo "**Requirements:** rooted device (Magisk, KernelSU or APatch), Android 10+."
+            } > "$body"
+          fi
           # Re-running must replace the assets rather than fail on files that
           # already exist. `gh release create` has no --clobber (it is a
           # `gh release upload` flag), so an existing release is deleted and
