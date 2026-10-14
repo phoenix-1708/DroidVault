@@ -40,6 +40,18 @@ enum class DeviceDataItem(val label: String) {
     BLUETOOTH("Bluetooth"),
     FOLDERS("Folders");
 
+    /** The archive file the engine verifies for this item, e.g. "Messages.shift". */
+    val archiveFile: String
+        get() = when (this) {
+            MESSAGES -> "Messages.shift"
+            CALLS -> "CallLogs.shift"
+            CONTACTS -> "Contacts.shift"
+            WIFI -> "Wi-Fi.shift"
+            WALLPAPER -> "Wallpaper.shift"
+            BLUETOOTH -> "Bluetooth.shift"
+            FOLDERS -> "Folders.shift"
+        }
+
     companion object {
         fun fromName(name: String): DeviceDataItem? = entries.find { it.name == name }
     }

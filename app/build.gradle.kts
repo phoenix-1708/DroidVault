@@ -602,6 +602,88 @@ android {
         // past 100% to 97% disk. engine/src/transfer.rs now packs, extracts with
         // measured percentages, and places by rename; Cancel exists in every
         // phase. Verified: 107-app import, export cancel, 4.2 GB round trip.
+        // 1.0.3 (300018) — a finding says how old it is, and the two records of
+        // one digest agree again.
+        //  - Home's health row states how long a finding has stood ("Found 3 days
+        //    ago") and which run has been over the vault since ("an app backup has
+        //    run since, so these may already be replaced"), so a finding that a
+        //    later run may already have repaired no longer reads as something that
+        //    just happened. The age belongs to the FINDING: it is carried forward
+        //    per archive while that archive keeps failing, and starts now when it
+        //    fails for the first time.
+        //  - The check dialog states the same age, and a result read back from
+        //    disk says which launch observed it.
+        //  - A `.sha256` edited outside the app is rewritten from the bytes the
+        //    index read back — the skip path already has the digest — so
+        //    `sha256sum -c` stops failing on an archive this app calls fine. The
+        //    run reports how many records it repaired, and the dialog says so.
+        // 1.0.2 (300017) — the verdict outlives the process.
+        //  - A check result lived only in memory, so a restart — or a low-memory
+        //    kill in the background — took a known-damaged archive with it: the
+        //    Home row went back to "not checked yet" and the pre-restore gate had
+        //    nothing to refuse with. The last conclusive report is written down in
+        //    app-private prefs and read back at startup, matched to the vault
+        //    folder it was taken in.
+        //  - What comes back is marked as read from disk, and a verdict that this
+        //    launch never observed does not show good news: the row reads "Checked
+        //    before this launch" and offers the check again. A FINDING is not
+        //    withdrawn — it still reads as damaged and still blocks the restore,
+        //    which is the whole reason to keep it.
+        //  - A run that observed nothing (cancelled, errored, empty vault) no
+        //    longer replaces what is stored, so a failed check cannot quietly
+        //    clear a finding the user has already been shown.
+        //  - The app-archives and device-archives halves of one verdict are merged
+        //    by one tested function now. The hand-written merge dropped the device
+        //    half's digest mismatches, byte count, read/skipped counts and its
+        //    cancelled flag, so a device archive whose bytes had changed was
+        //    reported as healthy.
+        //  - A check no longer withdraws the finding while it is still measuring
+        //    it. `verifyVault` held a null verdict for its whole run, and that
+        //    value is the only thing the pre-restore gate reads — so a
+        //    confirmed-damaged archive was restorable by the very control the
+        //    user had just pressed to confirm it, for as long as the check took.
+        //  - A verdict is re-read when the vault folder changes (move vault,
+        //    auto-detect). The stored record was path-matched, but the in-memory
+        //    copy was not, so the card and both gates went on describing the
+        //    folder the user had left. The re-read is a LOAD, so a folder with no
+        //    verdict of its own reads as "not checked yet".
+        //  - A refused restore is written to the diagnostics log, not only
+        //    toasted: a 2-second toast is not a record, and "why did Restore do
+        //    nothing" is exactly what a field report asks.
+        // Verified on device: check, restart, tamper, restart, repair, re-check;
+        // and for the three above — a restored finding surviving a restart with
+        // its archive names, a device restore refused INSIDE a running check's
+        // own window, and the refusal line in the log.
+        // 1.0.1 (300016) — a check that could not see a damaged archive.
+        //  - "Check" left a part unread when the vault index had already read it
+        //    back, and decided that from a modification time. On FUSE a same-size
+        //    edit lands in the same second as the marker, so a damaged archive was
+        //    reported as fine — and kept being reported as fine on every later
+        //    check, on the one screen whose job is to warn before a restore. The
+        //    decision is now made from the bytes: the part is hashed and compared
+        //    with the digest the index recorded. That still removes the expensive
+        //    half (decompressing the archive) and cannot hide a change.
+        //  - A part whose digest disagreed kept its read-back marker, because a
+        //    tampered archive keeps its sidecar and therefore keeps the very key
+        //    the marker was written against. The index went on calling that file
+        //    verified while every check flagged it. A refuted path now loses its
+        //    marker, and the finding stands until a real backup replaces it.
+        //  - The report's "read now" counter included Meta.txt, which is not one
+        //    of the five parts: a repeat check of a two-part app said "2 parts
+        //    unchanged, 1 read now". Read and skipped now add up to the parts
+        //    that were examined.
+        //  - A verdict no longer outlives the vault it describes. The Home health
+        //    line kept saying "all readable" after a run had written new archives,
+        //    because nothing recorded that the report was taken before it. Every
+        //    report now carries the run-gate epoch its bytes were read at, and a
+        //    healthy verdict from before the last run is withdrawn rather than
+        //    repeated — a damaged one is kept, because it still gates the restore.
+        //    The Manage banner's tap no longer deletes the result it exists to
+        //    show, and the Manage check now covers device archives like Home's.
+        // Verified on device: tamper, re-check, tamper again, device archives;
+        // and for the verdict age — check on Home, a gated run, the card reads
+        // "Backups changed since the last check", check again reads healthy; the
+        // Manage banner reopens the result instead of deleting it.
         // 1.0.0 (300015) — first public release.
         //
         // versionName is 1.0.0 — the first public release. versionCode stays
@@ -615,6 +697,71 @@ android {
         // architecture, each carrying only its own engine. A single universal
         // APK shipped all four ABIs, so a phone downloaded an engine for x86 it
         // would never run.
+        // 2.0.0 (400000) — stable. Debloat and restore work, and a run can no
+        // longer cancel itself.
+        //
+        // versionCode 400000, NOT the 200000 the "200000+ series for 2.x" rule
+        // suggests. versionCode must strictly INCREASE for `pm install -r` to
+        // accept an upgrade, and the 300000 band was already taken — v1.0.0
+        // published at 300015, with local builds on to 300019. So a 2.0.0 built
+        // at 200000 was refused on a real device with
+        // INSTALL_FAILED_VERSION_DOWNGRADE, and every published user would have
+        // had to uninstall first, losing their preferences and scheduled jobs.
+        // 400000 starts the 2.x band above everything 1.x ever published. (2.64)
+        //
+        // Everything in 1.0.4 below is included here, plus the behaviour a user
+        // actually feels: the restore list finds what debloat removed, a restore
+        // only says "done" when the app is really installed and launchable, and
+        // the irreversible debloat asks first. Breaking changes for anyone
+        // scripting the engine: `--restore-debloat` now takes the vault path as
+        // a second argument, and is only honest when `pm list packages -e`
+        // confirms the package.
+        // 1.0.4 (300019) — debloat and restore actually work, and a run can no
+        // longer cancel itself.
+        //  - Debloat's Restore tab could never list an app the debloat had just
+        //    removed: it drew rows from the package manager's uninstalled set,
+        //    which `cmd package uninstall` (Keep Data off) had just emptied. The
+        //    universe is the vault now; the filter is "not installed", which is
+        //    Canta's split and was never the bug. Reported on device with an
+        //    empty list. (2.56)
+        //  - Nothing could undo a removed app. `restore_debloat` tried only
+        //    install-existing/request-unarchive, both NameNotFoundException for
+        //    a package PackageManager has forgotten. It now reinstalls from the
+        //    app's own App.shift — and a restore is only reported successful once
+        //    `pm list packages -e` confirms the package is installed AND enabled.
+        //    `pm install` exits 0 for a package that comes back disabled, and
+        //    `request-unarchive` prints "Success" while installing nothing. (2.56, 2.59)
+        //  - The irreversible debloat was the DEFAULT and had no dialog. Keep
+        //    Data now defaults to the reversible path and the permanent one is
+        //    confirmed as irreversible. (2.56)
+        //  - A finished engine command cancelled the next one. `awaitClose` runs
+        //    on every exit including ordinary completion, and called
+        //    stopEngineBlocking() unconditionally — which touches the engine's
+        //    cancel flag. The next command in the same run then reported
+        //    ACTION:CANCELLED for work it never began. Measured as an import
+        //    that extracted all 482,592,475 bytes and said "Import cancelled". (2.57)
+        //  - An import wrote archives the screen never showed: it cleared the
+        //    cache but never re-read the app list. (2.58)
+        //  - A system app could be ticked, drawn checked, and still not backed
+        //    up — the list and the run used two different visibility rules. One
+        //    predicate now serves both. This is the half of the vault a ROM
+        //    flash destroys first. (2.60)
+        //  - Partition imaging took no run gate at all, so a dd could run beside
+        //    a backup and that backup's watchdog would pkill through it. (2.62)
+        //  - A Settings probe that timed out rendered as a failed check, telling
+        //    the user their engine was stale while it was current. Three-state
+        //    now: match / mismatch / no answer. (2.63)
+        //  - Automation's Add-rule sheet showed an empty Label row and a dead
+        //    button with no explanation. (2.61)
+        //  - Plus: the two verdicts, the content/permission/SSAID consent
+        //    handlers, a self-healed engine deployment, and the Wi-Fi credential
+        //    classifier that used to default unrecognised networks to "open".
+        //    All prior sections in AUDIT.md stand.
+        // Verified on device (POCO F6, Android 16, debug build): debloat →
+        // restore round trip for a permanently removed app, the irreversible
+        // confirmation, the Canta list, a 482 MB export/import round trip with
+        // all 21 archives byte-identical (sha256) afterwards, the run gate
+        // refusing a second operation in 58 ms, and a system-app backup.
         // 3.6.3 (300014) — signing hygiene, grammar, and a tab that says what it does.
         //  - Added a build-failing guard: signing material must never be staged
         //    for commit. Verified by force-staging the keystore, which failed
@@ -669,8 +816,8 @@ android {
         // Verified on device: 30 GB split export 30 min -> 3m07s; import
         // ~8 min -> ~2m45s; parts, manifest and Check all verified; archives
         // written by earlier builds still import unchanged.
-        versionCode = 300015
-        versionName = "1.0.0"
+        versionCode = 400000
+        versionName = "2.0.0"
     }
 
     signingConfigs {

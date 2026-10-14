@@ -193,6 +193,11 @@ object DeviceManager {
                 Shell.cmd("rm -f -- ${ShellQuote.q(tmp)}").exec()
                 return null
             }
+            // The archive was replaced, so its digest has to be replaced with it.
+            // Leaving the old one would report every folder still in there as
+            // changed since the backup — a true statement about the old file and
+            // a useless one about this one.
+            VaultDigest.record(src)
             return keep
         } catch (_: Exception) {
             return null
@@ -1747,11 +1752,27 @@ object DeviceManager {
                         "Backing up Wi-Fi...",
                         0
                     ); Shell.cmd("mkdir -p ${ShellQuote.q("$cacheDir/Wi-Fi")} && sh /data/adb/DroidVault/DroidVault.sh --backup-wifi ${ShellQuote.q("$cacheDir/Wi-Fi")}")
-                        .exec(); notify(
-                        "Compressing Wi-Fi...",
-                        80
-                    )
-                    packArchive(cacheDir, zapdosPath, "Wi-Fi", "$backupDir/Wi-Fi.shift", "Wi-Fi", onItemFailure)
+                        .exec()
+                    // Pack only if something was actually collected. `mkdir -p`
+                    // succeeds even when the engine then fails or finds no Wi-Fi
+                    // source on this ROM, and tar packs an EMPTY DIRECTORY just
+                    // fine — the run would report success and replace a good
+                    // archive with one holding nothing (invariant 23). Calls and
+                    // Contacts guard this the same way; verified on device that
+                    // zapdos exits 0 on empty input and `[ -s ]` passes on the
+                    // 22-byte result.
+                    if (hasContent(File(context.cacheDir, "Wi-Fi"))) {
+                        notify(
+                            "Compressing Wi-Fi...",
+                            80
+                        )
+                        packArchive(cacheDir, zapdosPath, "Wi-Fi", "$backupDir/Wi-Fi.shift", "Wi-Fi", onItemFailure)
+                    } else {
+                        onItemFailure?.invoke(
+                            "Wi-Fi",
+                            "no saved networks were read (Wi-Fi.shift not written)"
+                        )
+                    }
                     rmRfCacheSubdir(cacheDir, "Wi-Fi"); currentItemIndex++
                 }
                 if (doWallpaper) {
@@ -1759,11 +1780,22 @@ object DeviceManager {
                         "Backing up Wallpaper...",
                         0
                     ); Shell.cmd("sh /data/adb/DroidVault/DroidVault.sh --backup-wallpaper ${ShellQuote.q("$cacheDir/Wallpaper")}")
-                        .exec(); notify(
-                        "Compressing Wallpaper...",
-                        80
-                    )
-                    packArchive(cacheDir, zapdosPath, "Wallpaper", "$backupDir/Wallpaper.shift", "Wallpaper", onItemFailure)
+                        .exec()
+                    // Same rule as Wi-Fi: an empty Wallpaper dir packs cleanly and
+                    // would overwrite the only copy of the user's wallpaper with
+                    // an archive that holds nothing.
+                    if (hasContent(File(context.cacheDir, "Wallpaper"))) {
+                        notify(
+                            "Compressing Wallpaper...",
+                            80
+                        )
+                        packArchive(cacheDir, zapdosPath, "Wallpaper", "$backupDir/Wallpaper.shift", "Wallpaper", onItemFailure)
+                    } else {
+                        onItemFailure?.invoke(
+                            "Wallpaper",
+                            "no wallpaper was read (Wallpaper.shift not written)"
+                        )
+                    }
                     rmRfCacheSubdir(cacheDir, "Wallpaper"); currentItemIndex++
                 }
                 if (doBluetooth) {
@@ -1771,11 +1803,21 @@ object DeviceManager {
                         "Backing up Bluetooth...",
                         0
                     ); Shell.cmd("mkdir -p ${ShellQuote.q("$cacheDir/Bluetooth")} && sh /data/adb/DroidVault/DroidVault.sh --backup-bt ${ShellQuote.q("$cacheDir/Bluetooth")}")
-                        .exec(); notify(
-                        "Compressing Bluetooth...",
-                        80
-                    )
-                    packArchive(cacheDir, zapdosPath, "Bluetooth", "$backupDir/Bluetooth.shift", "Bluetooth", onItemFailure)
+                        .exec()
+                    // Same rule. Losing bt_config.conf means losing every paired
+                    // device, and it is the only copy of the pairing keys.
+                    if (hasContent(File(context.cacheDir, "Bluetooth"))) {
+                        notify(
+                            "Compressing Bluetooth...",
+                            80
+                        )
+                        packArchive(cacheDir, zapdosPath, "Bluetooth", "$backupDir/Bluetooth.shift", "Bluetooth", onItemFailure)
+                    } else {
+                        onItemFailure?.invoke(
+                            "Bluetooth",
+                            "no paired devices were read (Bluetooth.shift not written)"
+                        )
+                    }
                     rmRfCacheSubdir(cacheDir, "Bluetooth"); currentItemIndex++
                 }
                 if (doFolders) {
@@ -2098,16 +2140,6 @@ object DeviceManager {
     class DeviceDataRefused(val title: String, detail: String) : Exception(detail)
 
     /**
-     * Pack one staged cache entry into its `.shift` archive and report a write
-     * failure to BOTH callers through [onItemFailure].
-     *
-     * The pipeline exits with zapdos's status, so non-zero means nothing was
-     * written (ENOSPC, missing binary → 127 — both verified on-device). The
-     * inverse is the trap this is NOT for: zapdos exits 0 on EMPTY input and
-     * still writes a valid-looking archive, so a missing input is caught on the
-     * restore side instead, by checking the extracted output.
-     */
-    /**
      * Delete leftover `<name>.shift.tmp-<nanos>` files in the vault's device
      * folder, and the automation state file's, if any.
      *
@@ -2121,6 +2153,42 @@ object DeviceManager {
             Shell.cmd(
                 "find ${ShellQuote.q(dir)} -maxdepth 1 -type f -name '*.tmp-*' -delete 2>/dev/null"
             ).exec()
+        }
+    }
+
+    /**
+     * Pack one staged cache entry into its `.shift` archive and report a write
+     * failure to BOTH callers through [onItemFailure].
+     *
+     * The pipeline exits with zapdos's status, so non-zero means nothing was
+     * written (ENOSPC, missing binary → 127 — both verified on-device). The
+     * inverse is the trap this is NOT for: zapdos exits 0 on EMPTY input and
+     * still writes a valid-looking archive, so a missing input is caught on the
+     * restore side instead, by checking the extracted output.
+     */
+    /**
+     * Whether a staged device item actually collected something.
+     *
+     * A directory exists after `mkdir -p` even when the engine that was supposed
+     * to fill it failed, and tar packs an empty directory into a valid archive.
+     * The run then reports success and has replaced the user's only copy of their
+     * networks / wallpaper / paired devices with an archive containing nothing.
+     * Calls and Contacts already refuse to pack in that case; this is the same
+     * rule for the three items that gathered into a directory instead of a file.
+     *
+     * A directory that holds only empty subdirectories counts as empty, since
+     * those pack to nothing but a header.
+     */
+    internal fun hasContent(dir: File): Boolean {
+        if (!dir.isDirectory) return false
+        val entries = dir.listFiles() ?: return false
+        if (entries.isEmpty()) return false
+        return entries.any { entry ->
+            when {
+                entry.isFile -> entry.length() > 0
+                entry.isDirectory -> hasContent(entry)
+                else -> false
+            }
         }
     }
 
@@ -2148,7 +2216,15 @@ object DeviceManager {
         ).exec()
         if (!res.isSuccess) {
             onItemFailure?.invoke(itemLabel, "failed to write ${dest.substringAfterLast('/')}")
+            return
         }
+        // Record the digest at the moment the archive is promoted. The engine
+        // does this for the archives it writes (its `checksum` module), and a
+        // device archive is frequently the only copy of what it holds — a
+        // changed or truncated Messages.shift must be visible rather than
+        // discovered at restore time. Best-effort: the archive is written, so
+        // this cannot fail the part.
+        VaultDigest.record(dest)
     }
 
     /**
@@ -2243,17 +2319,32 @@ object DeviceManager {
         existing.forEachIndexed { idx, _ ->
             tarArgs.append(" -C ${ShellQuote.q(staging)} ${ShellQuote.q("F$idx")}")
         }
-        Shell.cmd(
-            "$tarArgs | ${ShellQuote.q(zapdosPath)} -1 -f -q -o ${ShellQuote.q(dst)}"
+        // Stage and rename, like `packArchive` and the engine's own writer.
+        // zapdos with `-o` straight at the live path truncates the good archive
+        // as it streams (-f has discarded the original by then), so a tar that
+        // died midway — a vanished source, ENOSPC, a cancelled run — left a
+        // TRUNCATED Folders.shift where a valid one used to be, and the check
+        // below only asked whether a file was there. This is the same defect
+        // S-06 fixed for the app archives.
+        val tmp = "$dst.tmp-${System.nanoTime()}"
+        val packed = Shell.cmd(
+            "$tarArgs | ${ShellQuote.q(zapdosPath)} -1 -f -q -o ${ShellQuote.q(tmp)} && " +
+                "[ -s ${ShellQuote.q(tmp)} ] && mv ${ShellQuote.q(tmp)} ${ShellQuote.q(dst)}"
         ).exec()
         rmRfCacheSubdir(cacheDir, "Folders")
 
-        if (Shell.cmd("[ -f ${ShellQuote.q(dst)} ] && echo y").exec().out.firstOrNull()?.trim() == "y") {
+        if (packed.isSuccess &&
+            Shell.cmd("[ -f ${ShellQuote.q(dst)} ] && echo y").exec().out.firstOrNull()?.trim() == "y"
+        ) {
+            // Only a promoted archive gets a digest: blessing a truncated one
+            // would make it look verified for as long as it existed.
+            VaultDigest.record(dst)
             notify(
                 "Folders backed up (${existing.size} folder${if (existing.size == 1) "" else "s"}).",
                 100
             )
         } else {
+            Shell.cmd("rm -f -- ${ShellQuote.q(tmp)}").exec()
             notify("Failed to write Folders archive", 100)
             // "Backup Complete!" for an item that produced no archive is the
             // same silent success the other device items now report.

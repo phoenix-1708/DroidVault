@@ -104,6 +104,47 @@ sealed class FlashAction {
 }
 
 @Immutable
+/**
+ * Why the app does or does not have root.
+ *
+ * A single Boolean answered "no" for three situations that need three different
+ * things from the user, and one of them is a dead end: `su` is present, Magisk
+ * has the app in its Superuser list with no policy row, and Magisk's
+ * authorisation dialog fails to open on that ROM — so tapping the button raises
+ * nothing, no toast appears, and the screen keeps saying "Approve Droid Vault in
+ * your root manager", which is the very step that is broken. Found on the
+ * reference device by hitting it, not by reading it.
+ */
+enum class RootState {
+    /** Not probed yet. */
+    Unknown,
+
+    /** `su` answered and the shell is root. */
+    Granted,
+
+    /** No `su` on the device at all — no Magisk, no KernelSU, nothing to grant. */
+    NoRootManager,
+
+    /**
+     * `su` exists but did not grant: denied, never prompted, or the prompt
+     * failed to appear. This is the case that needs manual instructions.
+     */
+    NotGranted
+}
+
+/**
+ * The state implied by what the device actually answered.
+ *
+ * Pure, so the three-way distinction is tested rather than asserted. Ordering
+ * matters: the absence of `su` explains everything, so it is decided first; and
+ * a root shell is the only answer that grants, whatever else was probed.
+ */
+fun classifyRoot(hasSuBinary: Boolean, shellIsRoot: Boolean): RootState = when {
+    shellIsRoot -> RootState.Granted
+    !hasSuBinary -> RootState.NoRootManager
+    else -> RootState.NotGranted
+}
+
 data class AppState(
     val migratorMode: MigratorMode = MigratorMode.MENU,
     val isRunning: Boolean = false,
@@ -111,6 +152,7 @@ data class AppState(
     val currentStep: String = "",
     val progress: Int = 0,
     val isFetchingApps: Boolean = false,
+    val rootState: RootState = RootState.Unknown,
     val systemAppsFetched: Boolean = false,
     val searchQuery: String = "",
     val showUserApps: Boolean = true,
@@ -144,7 +186,13 @@ data class AppState(
     val installStartTime: Long = 0,
     val totalInstallTimeSeconds: Long = 0,
     val requestDefaultSms: Boolean = false,
-    val keepDebloatData: Boolean = false,
+    val keepDebloatData: Boolean = true,
+    // Debloat with Keep Data off uninstalls for EVERY user and deletes /data,
+    // after which `install-existing` answers NameNotFoundException and this app
+    // can no longer put it back (measured on device). That is the one Debloat
+    // action that is not undoable from inside Droid Vault, so it is confirmed
+    // rather than run on a single tap like every other mode.
+    val pendingDebloatConfirm: Boolean = false,
     val showPartialSystemApps: Boolean = false,
     val allowFastInstall: Boolean = false,
     val allowSsaidRestore: Boolean = false,
@@ -153,5 +201,4 @@ data class AppState(
     val filterLabelId: String? = null,
     // True after an SMS restore completes: the messaging role handoff kills our
     // process (platform revokes role perms), so the UI closes itself first.
-
 )

@@ -141,10 +141,31 @@ class TransferService : Service() {
         // the user's attention, while doing nothing — and a user who taps
         // twice did not ask to queue.
         if (job?.isActive == true) {
+            // Same rule as the gate refusal below: the UI is already showing
+            // "Exporting…", and only a bus result clears it.
+            TransferBus.finish(
+                VaultTransferManager.Result.Failed(
+                    "A transfer is already running. Wait for it to finish, then try again."
+                )
+            )
             stopSelf(startId)
             return START_NOT_STICKY
         }
         if (!RunCoordinator.tryAcquire("transfer")) {
+            // A refusal has to be REPORTED, not just declined. The UI set
+            // `isRunning`/`isExporting` before starting us, and the only thing
+            // that clears them is a TransferBus result — so declining in
+            // silence left the sheet at "Exporting…" forever with no toast, and
+            // `isRunning` then refused every later run, including the ordinary
+            // Migrate ones. The app was dead until the process was killed.
+            //
+            // The most likely trigger is the ordinary one: starting an export
+            // while a scheduled backup holds the gate.
+            TransferBus.finish(
+                VaultTransferManager.Result.Failed(
+                    "A backup is already running. Wait for it to finish, then try again."
+                )
+            )
             stopSelf(startId)
             return START_NOT_STICKY
         }
@@ -182,10 +203,20 @@ class TransferService : Service() {
                             runCatching {
                                 val o = org.json.JSONObject(it)
                                 VaultTransfer.ConfigCounts(
-                                    o.optInt("labels"), o.optInt("configs"), o.optInt("schedules")
+                                    labels = o.optInt("labels"),
+                                    configs = o.optInt("configs"),
+                                    schedules = o.optInt("schedules"),
+                                    // Named, not positional: three positional
+                                    // arguments read as the 3-arg constructor and
+                                    // silently defaulted `folders` to 0, which is
+                                    // how a folder-only phone read as unconfigured.
+                                    // Named arguments make a dropped field a
+                                    // compile error instead of a wrong consent
+                                    // decision in the field.
+                                    folders = o.optInt("folders")
                                 )
                             }.getOrNull()
-                        } ?: VaultTransfer.ConfigCounts(0, 0, 0)
+                        } ?: VaultTransfer.ConfigCounts(0, 0, 0, 0)
                         VaultTransferManager.import(
                             this@TransferService, counts, vault, archive,
                             VaultTransfer.Merge.valueOf(merge ?: VaultTransfer.Merge.entries.first().name),
@@ -369,10 +400,21 @@ class TransferService : Service() {
                 .putExtra(EXTRA_STAGED, stagedCopy ?: "")
                 .putExtra(
                     EXTRA_COUNTS,
+                    // ALL FOUR, or the count that decides whether to ask the user
+                    // never survives the crossing. `folders` was computed and
+                    // dropped here, so a phone holding only a backup-folder
+                    // registry — an ordinary manual-only user — had its
+                    // `isEmpty` (the conjunction of all four) read as
+                    // "not configured", and the incoming configurations replaced
+                    // its state file without the confirmation this whole prompt
+                    // exists to require. A shared name whose two sides disagree is
+                    // invariant 29, and it was the count deciding consent that
+                    // went missing.
                     org.json.JSONObject()
                         .put("labels", counts.labels)
                         .put("configs", counts.configs)
                         .put("schedules", counts.schedules)
+                        .put("folders", counts.folders)
                         .toString()
                 )
             runCatching { context.startForegroundService(i) }

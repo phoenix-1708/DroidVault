@@ -99,12 +99,31 @@ object BackendInstaller {
                 "chmod 755 ${ShellQuote.q(launcherFile.absolutePath)}",
                 "chmod 755 ${ShellQuote.q(engineFile.absolutePath)}",
                 "chmod 755 ${ShellQuote.q(zapdosFile.absolutePath)}",
-                "chown -R root:root ${ShellQuote.q(targetDir)} 2>/dev/null"
+                "chown -R root:root ${ShellQuote.q(targetDir)}"
             )
 
             val result = Shell.cmd(*commands).exec()
 
-            if (result.isSuccess) {
+            // The chain's exit status is the LAST command's — `chown -R`, which
+            // is `2>/dev/null`'d and near-always succeeds. A failed `cp` (a
+            // reaped cache file, ENOSPC on /data, a read-only or SELinux-blocked
+            // /data/adb) therefore left the chain "successful", and six call
+            // sites recorded the engine as deployed. The first symptom was a
+            // backup refusing much later, with nothing pointing back here.
+            //
+            // So the deploy is judged on the BYTES THAT LANDED: every file must
+            // exist and be non-empty. This is invariant 22 — a verdict from the
+            // result, not from the plan — applied to the one gate everything else
+            // depends on.
+            val landed = listOf(launcherFile, engineFile, zapdosFile).all {
+                val f = File(it.absolutePath)
+                f.exists() && f.length() > 0L
+            }
+            val missing = listOf(launcherFile, engineFile, zapdosFile)
+                .filter { !File(it.absolutePath).exists() || File(it.absolutePath).length() == 0L }
+                .map { it.absolutePath }
+
+            if (result.isSuccess && landed) {
                 prefs.edit { putLong("installed_version", currentVersionCode) }
                 android.util.Log.i(TAG, "Engine updated to bundled version (sha256=${assetHash?.take(12)}…)")
                 DroidVaultLogger.i("Engine", "Engine deployed/updated to bundled build")
@@ -115,6 +134,14 @@ object BackendInstaller {
                     "installEngine shell failed: code=${result.code} out=${result.out.take(3)} err=${result.err.take(3)}"
                 )
                 DroidVaultLogger.w("Engine", "Engine deploy failed (shell code=${result.code})")
+            }
+            if (!landed) {
+                // Named, not counted: a field report says which file is absent.
+                android.util.Log.e(TAG, "Engine deploy left files missing: $missing")
+                DroidVaultLogger.w(
+                    "Engine",
+                    "Engine deploy did not land every file; missing or empty: ${missing.joinToString()}"
+                )
             }
         } catch (e: Exception) {
             android.util.Log.e("BackendInstaller", "installEngine failed: ${e.message}")

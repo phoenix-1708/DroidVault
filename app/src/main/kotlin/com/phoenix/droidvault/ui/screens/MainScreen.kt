@@ -366,6 +366,7 @@ fun MainScreen(viewModel: MainViewModel) {
     if (!appState.hasRoot) {
         NoRootScreen(
             isChecking = appState.isFetchingApps,
+            rootState = appState.rootState,
             onRetry = { viewModel.checkRootAccess() }
         )
         return
@@ -1248,7 +1249,14 @@ fun AppScaffold(
 @Composable
 fun OnboardingWizard(viewModel: MainViewModel) {
     val context = LocalContext.current
-    var step by remember { mutableIntStateOf(1) }
+    // `rememberSaveable`, not `remember`: a theme change or rotation recreates the
+    // Activity — stated in this same file as the reason `showSettings`/`showAbout`
+    // are saveable — and `remember` dumped the user back at step 1 with the typed
+    // vault path lost. It also re-entered step 1, and because `AnimatedContent`
+    // keys its content by `targetState`, that made `LaunchedEffect(Unit) {
+    // requestInitialPermissions() }` a NEW effect, re-raising the SMS / call-log
+    // / contacts batch the platform has usually stopped showing.
+    var step by rememberSaveable { mutableIntStateOf(1) }
 
     val backProgress = remember { Animatable(0f) }
     val scope = rememberCoroutineScope()
@@ -1568,7 +1576,16 @@ fun OnboardingStepContent(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
-                        placeholder = { Text("${android.os.Environment.getExternalStorageDirectory().absolutePath}/DroidVault") },
+                        // `@Nullable`, and Kotlin inserts no check for a platform type — this threw
+                        // on a device with no external volume, in the one
+                        // onboarding step that cannot be skipped. Two other calls
+                        // in this same file already guard it (`:1301`, `:1313`).
+                        placeholder = {
+                            Text(
+                                (android.os.Environment.getExternalStorageDirectory()
+                                    ?.absolutePath ?: "/storage/emulated/0") + "/DroidVault"
+                            )
+                        },
                         leadingIcon = {
                             Icon(
                                 Icons.Default.Storage,
@@ -1681,7 +1698,11 @@ fun OnboardingStepContent(
 }
 
 @Composable
-fun NoRootScreen(isChecking: Boolean, onRetry: () -> Unit) {
+fun NoRootScreen(
+    isChecking: Boolean,
+    rootState: com.phoenix.droidvault.models.RootState,
+    onRetry: () -> Unit
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1738,8 +1759,29 @@ fun NoRootScreen(isChecking: Boolean, onRetry: () -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Text("To get started", style = MaterialTheme.typography.titleMedium)
+                    // The dead end this replaces: on a ROM where Magisk's
+                    // authorisation dialog fails to open, tapping the button
+                    // raised nothing and this card went on telling the user to
+                    // "Approve Droid Vault in your root manager" — naming as the
+                    // next step the exact thing that was broken. Each state says
+                    // what is actually true, and `NotGranted` gives the manual
+                    // route that works when the prompt does not appear.
                     Text(
-                        "1. Tap Check access.\n2. Approve Droid Vault in your root manager.\n3. Return here if the permission prompt was missed.",
+                        when (rootState) {
+                            com.phoenix.droidvault.models.RootState.NoRootManager ->
+                                "This device has no root manager, so Droid Vault cannot " +
+                                    "read other apps' data. Install Magisk, boot, then tap " +
+                                    "Check access and approve Droid Vault."
+                            com.phoenix.droidvault.models.RootState.NotGranted ->
+                                "A root manager is installed but has not granted Droid " +
+                                    "Vault.\n\nIf no prompt appeared, grant it manually: " +
+                                    "open Magisk → Superuser, find Droid Vault, and turn " +
+                                    "it on. Then tap Check access again."
+                            else ->
+                                "1. Tap Check access.\n2. Approve Droid Vault in your root " +
+                                    "manager.\n3. Return here if the permission prompt was " +
+                                    "missed."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

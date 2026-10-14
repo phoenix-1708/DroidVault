@@ -8,12 +8,16 @@ use std::env;
 use std::process::ExitCode;
 
 mod archive;
+mod checksum;
 mod command;
 mod device;
 mod engine;
 mod install;
+mod manifest;
 mod partitions;
 mod protocol;
+mod quiesce;
+mod restore;
 mod targets;
 mod tools;
 mod transfer;

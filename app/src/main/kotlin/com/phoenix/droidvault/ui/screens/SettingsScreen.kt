@@ -818,13 +818,21 @@ fun SettingsTab(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // `null` reaches here only when the probe was RUN and gave
+                        // no answer (a timeout, a failed shell) — the rows are not
+                        // rendered at all before the check completes. So this is
+                        // not "checking", and calling it that is the same
+                        // laundering a timeout into a state it never had. The
+                        // neutral Info icon is right; the wording has to be too.
                         Icon(
                             when {
                                 ok == null -> Icons.Default.Info
                                 ok -> Icons.Default.Check
                                 else -> Icons.Default.Close
                             },
-                            contentDescription = if (ok == null) "Checking" else if (ok) "OK" else "Attention needed",
+                            contentDescription = if (ok == null) {
+                                "Could not be checked"
+                            } else if (ok) "OK" else "Attention needed",
                             tint = when {
                                 ok == null -> MaterialTheme.colorScheme.onSurfaceVariant
                                 ok -> MaterialTheme.colorScheme.primary
@@ -860,7 +868,11 @@ fun SettingsTab(
 
                     }
                 }
-                if (permCheck != null && permCheck!!.let { it.appopUsageStats && it.postNotifications && it.deviceidleWhitelisted && it.engineMatch && it.restrictedSettingsAllowed }) {
+                // `== true`, not a bare `&&`: `engineMatch` is tri-state, and an
+                // unanswered probe must not count as "fresh" any more than it
+                // counts as stale. The summary line is a claim about every grant,
+                // so it may only be made when every one of them was actually read.
+                if (permCheck != null && permCheck!!.let { it.appopUsageStats && it.postNotifications && it.deviceidleWhitelisted && it.engineMatch == true && it.restrictedSettingsAllowed }) {
                     Text(
                         "All standing grants are fresh.",
                         style = MaterialTheme.typography.bodySmall,

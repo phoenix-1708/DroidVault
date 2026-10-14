@@ -48,7 +48,19 @@ class ConventionGuardTest {
         // what it means, and a guard that forced the long form there would just
         // be noise. Matched by the surrounding file rather than the line, so a
         // multi-line user-facing string is still caught.
-        val userFacing = setOf("ui/", "DashboardScreen", "TrashUi", "VerificationDialog")
+        //
+        // `ToolsManager` and `MigratorManager` are here because the strings the
+        // USER reads are not all under `ui/`: the debloat and restore completion
+        // messages ("Successfully removed 1 apps") are built in the manager that
+        // raises them, so a ui/-only guard let them through.
+        val userFacing = setOf(
+            "ui/",
+            "DashboardScreen",
+            "TrashUi",
+            "VerificationDialog",
+            "ToolsManager",
+            "MigratorManager"
+        )
         val banned = Regex("""\$\{?[A-Za-z0-9_.()]+}?\s+(apps|backups|parts|labels|schedules|configurations|assignments|folders|archives)\b(?!s)""")
         val offenders = mutableListOf<String>()
         File(repoRoot, "app/src/main/kotlin").walkTopDown()
@@ -86,6 +98,20 @@ class ConventionGuardTest {
         source.replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL), " ")
             .replace(Regex("//[^\n]*"), " ")
 
+    /**
+     * Comments removed without moving anything else.
+     *
+     * [code] collapses a block comment to a single space, which is fine for
+     * "does this pattern appear" and useless for "on which line" — every line
+     * number after the first KDoc points at the wrong place. This variant keeps
+     * the newlines and the character offsets, so an offender can be reported at
+     * the line a reader has to open.
+     */
+    private fun codeKeepLines(source: String): String =
+        source.replace(Regex("/\\*.*?\\*/", RegexOption.DOT_MATCHES_ALL)) { m ->
+            m.value.map { if (it == '\n') '\n' else ' ' }.joinToString("")
+        }.replace(Regex("//[^\n]*"), "")
+
     // --- toasts must be thread-safe ----------------------------------------
     // `Toast.makeText` throws NPE on any thread without a Looper, which is every
     // Dispatchers.IO worker. Found on device as a crash on the undo path
@@ -109,7 +135,15 @@ class ConventionGuardTest {
             file.readLines().forEachIndexed { index, line ->
                 val t = line.trim()
                 if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return@forEachIndexed
-                if ("Toast.makeText(" in line) offenders += "$relative:${index + 1}"
+                // Two forms, because AGENTS.md's own lesson applies here: a
+                // guard that only matches ONE spelling reads as enforced over a
+                // smaller set than §4 claims. `AboutScreen` wrote the call with the
+                // token split across a newline, so `"Toast.makeText(" in line`
+                // returned nothing for the whole file and the two sites sat
+                // outside the rule.
+                if ("Toast.makeText(" in line || line.trimStart().startsWith(".makeText(")) {
+                    offenders += "$relative:${index + 1}"
+                }
             }
         }
         assertTrue(
@@ -1018,6 +1052,189 @@ class ConventionGuardTest {
         )
     }
 
+    // --- a verdict about the vault cannot outlive a run over it -------------
+
+    @Test
+    fun `every screen that states a vault verdict is told which vault it is about`() {
+        // `BackupHealth.from` takes the vault's change counter, and DEFAULTS it
+        // to 0 — which is the honest value for "no run has released the gate in
+        // this session", so a caller that forgets it does not crash and does not
+        // fail loudly; the dashboard simply keeps showing a tick for a vault that
+        // has since been rewritten. The screens that take a `stale` argument
+        // (VerificationDialog, VerificationBanner) are enforced by the compiler
+        // because that parameter has no default. This is the one function where
+        // a default would quietly compile the defect back in, so it is checked by
+        // reading the call sites.
+        val offenders = mutableListOf<String>()
+        File(repoRoot, "app/src/main/kotlin").walkTopDown()
+            .filter { it.extension == "kt" }
+            .forEach { file ->
+                val src = codeKeepLines(file.readText())
+                var idx = src.indexOf("BackupHealth.from(")
+                while (idx >= 0) {
+                    val open = idx + "BackupHealth.from(".length
+                    val close = src.indexOf(')', open)
+                    val args = if (close > open) src.substring(open, close) else ""
+                    val line = src.take(idx).count { it == '\n' } + 1
+                    // The declaration lives in BackupHealth.kt as `fun from(...)`,
+                    // so it cannot match "BackupHealth.from("; only a call does.
+                    if (!args.contains(',')) {
+                        offenders += "${file.name}:$line  BackupHealth.from($args)"
+                    }
+                    idx = src.indexOf("BackupHealth.from(", idx + 1)
+                }
+            }
+        assertTrue(
+            "these render a verdict without the epoch it was taken at, so a run " +
+                "since then cannot invalidate it:\n" + offenders.joinToString("\n"),
+            offenders.isEmpty()
+        )
+    }
+
+    // --- one check, and it covers everything --------------------------------
+
+    @Test
+    fun `no entry point checks app archives without the device archives`() {
+        // `verifyVault()` defaults `deviceData` to false. The Manage screen's
+        // "Verify backups" chip called it that way, so the same label meant two
+        // different things: on Home it checked every archive, and on Manage it
+        // read app archives and left Messages/CallLogs/Folders unexamined —
+        // reporting "all readable" about work that never ran (§2.44). The run
+        // doc already says one button covers everything; this keeps every call
+        // site saying so out loud, because the default silently accepts the
+        // smaller job.
+        val offenders = mutableListOf<String>()
+        File(repoRoot, "app/src/main/kotlin").walkTopDown()
+            .filter { it.extension == "kt" }
+            .forEach { file ->
+                codeKeepLines(file.readText()).split('\n').forEachIndexed { i, line ->
+                    if (line.contains("verifyVault()")) offenders += "${file.name}:${i + 1}"
+                }
+            }
+        assertTrue(
+            "these check the vault with the default scope, which skips device data:\n" +
+                offenders.joinToString("\n"),
+            offenders.isEmpty()
+        )
+    }
+
+    // --- a check decides its answer, not where its answer is shown -----------
+
+    @Test
+    fun `a check never decides by itself to show the result dialog`() {
+        // Only the Backups tab composes `VerificationDialog`, and `verifyVault`
+        // used to reveal it as a side effect of running. Found on the device
+        // 2026-10-13: tapping Check on Home set the flag, and the dialog then
+        // appeared over the Backups tab when the user happened to open it — a
+        // behaviour chosen by navigation order, which is invariant 21's failure
+        // in miniature. Exactly two functions may reveal it, and both mean "show
+        // it now": the banner's re-open and the screen that starts a check.
+        val src = code(
+            read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/MainViewModel.kt"))
+        )
+        val reveals = Regex("_verificationDialogVisible\\.value = true").findAll(src).count()
+        assertEquals(
+            "expected exactly two places that reveal the dialog — `openVerificationDialog` " +
+                "and `showVerificationDialog`; a third means a check, or a worker, is deciding " +
+                "to put a dialog on a screen that may never be shown",
+            2, reveals
+        )
+        assertTrue(
+            "`showVerificationDialog` must exist: the control that starts a check opens its " +
+                "own dialog, because the check itself cannot know which screen asked",
+            src.contains("fun showVerificationDialog()")
+        )
+    }
+
+    // --- one restore-integrity gate, on every path that restores -------------
+
+    @Test
+    fun `both device-data restore entry points consult the device gate`() {
+        // The rule shipped on one path before — that is the L-01/L-02 shape, and
+        // the §2.44 defect one screen out: the manual Migrate flow refused a
+        // damaged archive while the scheduler restored from it headlessly, with
+        // nobody watching. There are exactly two places a device restore starts,
+        // and each has to apply the same function: buying a second check by hand
+        // is how the first one ends up describing a different restore than the
+        // one that runs.
+        val manual = code(
+            read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/MainViewModel.kt"))
+        )
+        val scheduled = code(
+            read(
+                File(
+                    repoRoot,
+                    "app/src/main/kotlin/com/phoenix/droidvault/utils/AutomationRunner.kt"
+                )
+            )
+        )
+        assertTrue(
+            "the manual device restore (runDeviceDataOperation) must consult " +
+                "restoreBlockReasonDevice, or a known-damaged Messages.shift is written " +
+                "into the provider",
+            manual.contains("restoreBlockReasonDevice(")
+        )
+        assertTrue(
+            "the scheduled restore must consult restoreBlockReasonDevice too: a device-only " +
+                "config is restored with nobody watching",
+            scheduled.contains("restoreBlockReasonDevice(")
+        )
+    }
+
+    // --- a verdict has to outlive the process --------------------------------
+
+    @Test
+    fun `the app writes its verdict down and reads it back when it starts`() {
+        // Two halves of one rule, and dropping either one loses the finding
+        // silently: a check that is never saved is forgotten on the next launch
+        // (the restore gate then has nothing to refuse with), and a stored verdict
+        // that is never loaded is a file nobody reads. Both are call-site facts,
+        // so both are read off the source rather than trusted to a comment.
+        val src = code(
+            read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/MainViewModel.kt"))
+        )
+        assertTrue(
+            "MainViewModel must persist a conclusive check (VaultVerdictStore.saveIfConclusive): " +
+                "a verdict held only in memory disappears with the process, which is the " +
+                "interval a wipe-then-restore spans",
+            src.contains("VaultVerdictStore.saveIfConclusive(")
+        )
+        assertTrue(
+            "MainViewModel must load the stored verdict (VaultVerdictStore.load) so the gate " +
+                "has one before any run can start",
+            src.contains("VaultVerdictStore.load(")
+        )
+    }
+
+    @Test
+    fun `only the loader may mark a report as restored`() {
+        // `restoredFromDisk` is what withdraws good news from a verdict that was
+        // read back from disk. A run that set it on its own fresh report would
+        // hide real results; worse, if a LOADER forgot to set it, a stored
+        // verdict would be rendered as if this process had just measured the
+        // vault — the §2.46 defect across a restart. One assignment site, in the
+        // codec, is what makes the flag mean "nobody here has looked".
+        val sites = mutableListOf<String>()
+        File(repoRoot, "app/src/main/kotlin").walkTopDown()
+            .filter { it.extension == "kt" }
+            .forEach { file ->
+                codeKeepLines(file.readText()).split('\n').forEachIndexed { i, line ->
+                    if (line.contains("restoredFromDisk = true")) {
+                        sites += "${file.name}:${i + 1}"
+                    }
+                }
+            }
+        assertEquals(
+            "expected exactly one place that marks a report as read back from disk " +
+                "(VaultVerdict.forVault); found $sites",
+            1, sites.size
+        )
+        assertTrue(
+            "and it must be the codec: ${sites.first()}",
+            sites.first().startsWith("VaultVerdict.kt")
+        )
+    }
+
     // --- §4.27 The transfer's reader and the store's writer must agree -------
 
     @Test
@@ -1064,6 +1281,366 @@ class ConventionGuardTest {
             "fromJson must not read a \"configs\" key: the serialiser writes " +
                 "\"configurations\", and a reader that misses it always sees 0",
             Regex("""n\("configs"\)""").containsMatchIn(reader)
+        )
+    }
+
+    // --- the finding survives the check that is re-measuring it ---------------
+
+    @Test
+    fun `a running check does not withdraw the finding it is re-measuring`() {
+        // Found while reading the same rule one phase further in. `verifyVault`
+        // set `_verification` to null before it looked at anything, and that
+        // flow is the ONLY thing the pre-restore gate reads — so for as long as a
+        // check ran (seconds on a small vault, minutes on a 30 GB one), a
+        // confirmed-damaged archive was restorable, by the very control the user
+        // had just pressed to confirm the damage. A check that has not finished
+        // has measured nothing: it has no standing to withdraw a finding, and the
+        // screens do not need it withdrawn either — the card reads "Checking
+        // backups" while `isVerifying` and the banner hides itself, so the old
+        // verdict is invisible except to the gate that must keep refusing.
+        val src = code(
+            read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/MainViewModel.kt"))
+        )
+        val body = Regex("""fun verifyVault\(.*?\n    \}""", RegexOption.DOT_MATCHES_ALL)
+            .find(src)?.value
+        assertNotNull("could not find verifyVault in MainViewModel", body)
+        assertFalse(
+            "verifyVault must not clear the verdict before it has a replacement: the " +
+                "pre-restore gate reads that value, so clearing it unblocks a restore of " +
+                "the archive the check is still confirming is damaged",
+            body!!.contains("_verification.value = null")
+        )
+        assertTrue(
+            "and the finished report must still replace it, with a run that observed " +
+                "nothing keeping the finding (VaultVerdict.shownAfter)",
+            body.contains("VaultVerdict.shownAfter(")
+        )
+    }
+
+    @Test
+    fun `a verdict is re-read when the vault folder changes`() {
+        // A verdict describes ONE folder's archives — that is why the record
+        // carries its path and why the loader refuses a record taken elsewhere.
+        // The report held in memory is not path-checked, so a vault that moves (or
+        // is auto-detected to another folder) would otherwise go on being vouched
+        // for, or refused, by a check of files it never read. Every place the path
+        // is assigned must therefore re-read the verdict; the load path-matches,
+        // so a folder with no verdict of its own becomes null — the honest "not
+        // checked yet", and never the previous folder's answer.
+        val src = code(
+            read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/MainViewModel.kt"))
+        )
+        val lines = src.split('\n')
+        val assignments = lines.withIndex().filter { it.value.contains("_savedPath.value =") }
+        assertTrue(
+            "expected the vault path to be assigned somewhere in MainViewModel — if this " +
+                "is empty the path moved behind a helper and this guard needs re-pointing",
+            assignments.isNotEmpty()
+        )
+        val missing = assignments.filter { (i, _) ->
+            lines.drop(i).take(40).none { it.contains("reloadVerdict()") }
+        }.map { (i, line) -> "line ${i + 1}: ${line.trim()}" }
+        assertTrue(
+            "these change the vault folder without re-reading the verdict, so the card " +
+                "and the restore gate keep describing the folder the user left:\n" +
+                missing.joinToString("\n"),
+            missing.isEmpty()
+        )
+        assertTrue(
+            "and the startup path is the same rule one launch earlier",
+            src.contains("VaultVerdictStore.load(getApplication(), _savedPath.value)")
+        )
+    }
+
+    // --- a restored tree must be readable by the app that will read it ------
+
+    /**
+     * The body of a `fn`/`fun`, by brace matching from its declaration.
+     *
+     * A guard that greps a whole file for the thing it names is not guarding
+     * that thing. `chcon` is called elsewhere in this engine for other reasons,
+     * and one stray match would report the rule as enforced while the restore
+     * path quietly lost it again — which is exactly what happened here.
+     */
+    private fun rustSpanLike(source: String, name: String): String? {
+        val decl = Regex("""\b(?:fn|fun)\s+$name\b""").find(source) ?: return null
+        val open = source.indexOf('{', decl.range.last)
+        if (open < 0) return null
+        var depth = 0
+        for (i in open until source.length) {
+            when (source[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return source.substring(open, i + 1)
+                }
+            }
+        }
+        return null
+    }
+
+    @Test
+    fun `a restored tree is labelled for the app that has to read it`() {
+        // Found on device (POCO F6, Android 16): every file a restore placed under
+        // /data/data/<pkg> came back `system_data_file`, because `plat_file_contexts`
+        // has no `/data/data` entry and `restorecon -R` is therefore a silent no-op
+        // there — the old comment here claimed it "DOES repair it", and it did not.
+        // Brave could not open its own History database, and Chromium's answer to a
+        // history database it cannot read is to mark every row `hidden`: the restore
+        // reported success, the browser opened empty, and relabelling the files
+        // afterwards did not bring the rows back.
+        //
+        // The rule: the placement pass applies the app-data label explicitly rather
+        // than leaving it to restorecon. Checked inside the span of the function
+        // that does the fixing, so `chcon` used elsewhere cannot stand in for it.
+        val src = code(read(File(repoRoot, "engine/src/restore.rs")))
+        val owner = rustSpanLike(src, "fix_ownership_and_labels")
+        assertNotNull("could not find fn fix_ownership_and_labels — re-point this guard", owner)
+        val inlined = owner!!.contains("chcon")
+        val delegated = Regex("""\bapply_app_data_label\s*\(""").containsMatchIn(owner) &&
+            (rustSpanLike(src, "apply_app_data_label") ?: "").contains("chcon")
+        assertTrue(
+            "fix_ownership_and_labels must label a placed tree explicitly: restorecon " +
+                "alone leaves it system_data_file, and an app cannot read its own " +
+                "restored data under that label",
+            inlined || delegated
+        )
+    }
+
+    @Test
+    fun `the ssaid settings file is replaced by a rename, never an in-place copy`() {
+        // Invariant 23 in the worst available place. `fs::copy` opens the
+        // destination O_TRUNC, so `settings_ssaid.xml` is destroyed at the START
+        // of the copy, not the end — measured on the reference device with a
+        // blocked writer: the live file read back as 5 bytes of the incoming
+        // data with the original header already gone.
+        //
+        // The old code kept a backup and read it only when `fs::copy` RETURNED an
+        // error, which is no help at all here: a SIGKILL or a power loss in that
+        // window returns nothing, so no code path ever runs the restore. A
+        // truncated ABX settings file is unparseable by SettingsProvider, so one
+        // interrupted write of ONE app's SSAID takes down every app's identity.
+        //
+        // The rule: the finished file is renamed into place. Not "a backup is
+        // kept" — the rename is what makes the swap atomic, and a backup cannot
+        // be consulted after a crash.
+        val src = code(read(File(repoRoot, "engine/src/engine.rs")))
+        val fn = rustSpanLike(src, "write_ssaid")
+        assertNotNull("could not find fn write_ssaid — re-point this guard", fn)
+        val body = fn!!
+        assertFalse(
+            "write_ssaid must not copy over the live settings file: a copy " +
+                "truncates it first, so a crash mid-write destroys the original " +
+                "with no code path left to restore it (invariant 23)",
+            Regex("""fs::copy\([^)]*,[^)]*path\)""").containsMatchIn(body)
+        )
+        assertTrue(
+            "write_ssaid must finish with a rename over the live file, which is " +
+                "the only act that has no partial state",
+            body.contains("fs::rename")
+        )
+        // And it must stage in the target's own directory, or the rename is
+        // across a filesystem boundary and is a copy with extra steps.
+        assertTrue(
+            "the staged file must live in the target's directory so the rename " +
+                "cannot cross a filesystem (invariant 32)",
+            Regex("""\w+\s*=\s*\w+\.parent\(\)""").containsMatchIn(body) ||
+                body.contains(".parent()")
+        )
+    }
+
+    @Test
+    fun `a partition image is staged, renamed, and never flashed unverified`() {
+        // The most dangerous path in the app. `dd of=<final>` truncates the
+        // destination at open(2), so a failed or ENOSPC read destroyed the
+        // PREVIOUS good image on the way to reporting "Backup failed" — and left
+        // the truncated file behind, still listed and still offered to flash.
+        //
+        // Worse, the checksum gate could not see it: the digest is recorded only
+        // after `dd && sync` succeed, so the truncated image is the one with NO
+        // sidecar — and the gate returned Ok(()) when the sidecar was missing.
+        // Its own comment said it existed because "an image truncated by an
+        // interrupted dd was flashed as-is"; as written it waved through exactly
+        // that case. A partial image written to `boot` is a bricked phone.
+        val src = code(read(File(repoRoot, "engine/src/partitions.rs")))
+
+        // 1. The backup must stage and rename, never dd into the live name.
+        val backup = rustSpanLike(src, "live_backup")
+        assertNotNull("could not find live_backup — re-point this guard", backup)
+        val ddTarget = Regex("""format!\("of=\{\}", ([a-zA-Z_][\w.]*)\.display\(\)\)""")
+            .findAll(backup!!)
+            .map { it.groupValues[1] }
+            .toList()
+        assertTrue(
+            "live_backup must dd into a STAGING path, not the image name itself: " +
+                "an interrupted read then leaves the previous good image intact " +
+                "(invariant 23). Offending targets: " +
+                ddTarget.filter { !it.contains("tmp") && !it.contains("staged") },
+            ddTarget.isNotEmpty() && ddTarget.none { it == "image" }
+        )
+        assertTrue(
+            "the staged image must be promoted by a rename",
+            backup.contains("fs::rename")
+        )
+        // 2. The gate must fail closed on a missing digest.
+        val gate = rustSpanLike(src, "flash_gate")
+        assertNotNull("could not find flash_gate — re-point this guard", gate)
+        assertFalse(
+            "a missing checksum record must be a REFUSAL, not a pass: its absence " +
+                "is the signature of an interrupted dd, and a partial image " +
+                "flashed to a boot partition bricks the device",
+            Regex("""let Some\(recorded\)\s*=\s*sidecar\s*else\s*\{\s*return Ok""")
+                .containsMatchIn(gate!!)
+        )
+        assertTrue(
+            "the gate must refuse when the bytes do not match the record",
+            Regex("""!digest_matches\s*\{\s*return Err""").containsMatchIn(gate)
+        )
+    }
+
+    @Test
+    fun `a shell timeout actually stops the engine`() {
+        // Verified by decompiling libsu 6.0.0 from this project's own dependency
+        // cache: `ResultFuture.cancel(boolean)` is `return latch.getCount() != 0`.
+        // It ignores the flag, interrupts nothing, and `isCancelled()` is
+        // hardcoded to `false`. So `future.cancel(true)` on a timeout stopped
+        // nothing — the engine kept packing archives into the vault with its
+        // output discarded, the run gate was released, and the user could start a
+        // second run against the same folder. Two writers, one gate.
+        //
+        // This file previously documented the opposite in its KDoc, which is why
+        // the finding survived: invariant 39 and §2.43 both rest on `cancel(true)`
+        // interrupting the engine, and it does not.
+        //
+        // The rule: a trip must raise the engine's own cancel flag AND confirm
+        // the process is gone before the run is reported failed and the gate
+        // released. Without the confirmation the gate is handed back while a
+        // writer is still live.
+        val src = code(read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/utils/ShellEngine.kt")))
+        val fn = rustSpanLike(src, "stopEngineBlocking")
+        assertNotNull("could not find the engine stop routine — re-point this guard", fn)
+        val body = fn!!
+        assertTrue(
+            "a timeout must raise the engine's own cancel flag; the hard kill alone " +
+                "can leave an archive half written",
+            body.contains("ENGINE_CANCEL_FLAG") || body.contains("droidvault_cancel")
+        )
+        assertTrue(
+            "the engine must be signalled by process name — libsu's Future cannot " +
+                "be used for this, it is a no-op",
+            body.contains("pkill")
+        )
+        // Presence is not enough: a `pgrep` inside an unreachable branch checks
+        // nothing, which is exactly how a no-op passes a `contains` assertion.
+        // The confirmation has to be a bounded RETRY, so both the probe and the
+        // loop that repeats it are required.
+        assertTrue(
+            "the stop must CONFIRM the process is gone before returning, or the run " +
+                "gate is released while the engine is still writing",
+            body.contains("pgrep") && body.contains("pidof")
+        )
+        assertTrue(
+            "the confirmation must be a bounded retry loop; a single probe cannot " +
+                "distinguish 'died' from 'not dead yet'",
+            Regex("""\bwhile\s*\(""").containsMatchIn(body)
+        )
+        assertTrue(
+            "the retry must be bounded by a deadline, or a stuck engine hangs the " +
+                "close path forever",
+            body.contains("deadline")
+        )
+        // Both exit paths must go through it: a timeout, and an abandoned
+        // collector (cancel). One without the other leaves a live writer.
+        assertTrue(
+            "the timeout path must stop the engine, not just close the flow",
+            Regex("""catch\s*\(_?\s*:\s*TimeoutException\)[\s\S]{0,400}?stopEngineBlocking""")
+                .containsMatchIn(src)
+        )
+        assertTrue(
+            "awaitClose (cancel / collector teardown) must stop the engine too",
+            Regex("""awaitClose\s*\{[\s\S]{0,300}?stopEngineBlocking""").containsMatchIn(src)
+        )
+        // And the false claim must not come back.
+        assertFalse(
+            "ShellEngine must not claim Future.cancel interrupts the engine — " +
+                "verified false against libsu 6.0.0",
+            Regex("""cancel\(true\)\s*(interrupts|\*\*interrupts)""").containsMatchIn(src) ||
+                Regex("""Future\.cancel]?\s*interrupts""").containsMatchIn(src)
+        )
+    }
+
+    @Test
+    fun `a debloat restore is confirmed installed, never inferred from an exit code`() {
+        // Measured on device: restoring an app that had been `cmd package
+        // archive`d rather than uninstalled. `install-existing` correctly failed
+        // with NameNotFoundException; `request-unarchive` then printed "Success"
+        // and exited 0 while the package stayed uninstalled for the user. The
+        // engine trusted the exit status, printed RESTORED, and the screen said
+        // "Restore Complete! Successfully restored 1 app."
+        //
+        // The verb decides HOW to try; only the package manager's own answer
+        // decides whether it worked.
+        val tools = File(repoRoot, "engine/src/tools.rs").readText()
+        val body = tools.substring(
+            tools.indexOf("pub fn restore_debloat"),
+            tools.indexOf("pub fn restore_debloat") + 2600
+        )
+        assertTrue(
+            "restore_debloat must confirm the package with installed_and_enabled " +
+                "before reporting RESTORED",
+            Regex("""if\s+installed_and_enabled\(package\)\s*\{[^}]*RESTORED""")
+                .containsMatchIn(body)
+        )
+        assertFalse(
+            "restore_debloat must NOT reach RESTORED by short-circuiting two " +
+                "`status(...)` exit codes — `request-unarchive` prints Success and " +
+                "exits 0 for a package it did not install",
+            Regex("""\|\|\s*status\(""")
+                .containsMatchIn(body.substringBefore("/// Is [package]"))
+        )
+        // And the question it asks must be "installed AND enabled". A reinstall can
+        // leave a package present and unlaunchable — measured: "Successfully
+        // restored 2 apps" while both sat disabled. `pm list packages` without
+        // `-e` would call that a success.
+        assertTrue(
+            "the confirmation must ask for ENABLED packages, not merely present " +
+                "ones — a reinstall can leave the package installed but disabled",
+            Regex("""\"list\",\s*\"packages\",\s*\"-e\"""")
+                .containsMatchIn(tools)
+        )
+    }
+
+    @Test
+    fun `the migrator list and the run share ONE visibility predicate`() {
+        // The defect was not that the predicate was wrong, it was that there were
+        // TWO of them: the screen drew rows with `showSystemApps ||
+        // (showPartialSystemApps && isLaunchable)` while `runnableSelectedApps`
+        // honoured `showSystemApps` alone, so a ticked Chrome drew checked while
+        // the count stayed 0 and the button stayed dead. Fixing the arithmetic in
+        // both places only leaves the next divergence waiting.
+        val screen = read(File(mainSrc, "com/phoenix/droidvault/ui/screens/MigratorScreen.kt"))
+        val vm = read(File(mainSrc, "com/phoenix/droidvault/MainViewModel.kt"))
+
+        assertTrue(
+            "MigratorScreen must ask the shared predicate, not re-derive the " +
+                "system-app test inline (that is what let the two drift)",
+            screen.contains("isShownInMigrator(app, appState)")
+        )
+        assertFalse(
+            "the system-app visibility test must not be written out a second time " +
+                "in MigratorScreen — one implementation, two consumers",
+            Regex("""showSystemApps\s*\|\|\s*\(\s*appState\.showPartialSystemApps""")
+                .containsMatchIn(screen)
+        )
+        assertTrue(
+            "runnableSelectedApps must ask the shared predicate",
+            Regex("""isSelected\s*&&\s*[\w.]*isShownInMigrator\(""")
+                .containsMatchIn(vm)
+        )
+        assertFalse(
+            "and must not keep its own copy of the system-app test",
+            Regex("""it\.isSystem\s*&&\s*state\.showSystemApps""")
+                .containsMatchIn(vm)
         )
     }
 }

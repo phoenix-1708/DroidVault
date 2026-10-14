@@ -6,6 +6,7 @@ import com.phoenix.droidvault.models.VerificationReport
 import com.phoenix.droidvault.models.restoreBlockReason
 import com.phoenix.droidvault.models.verifyReportAllowsRestore
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -62,6 +63,75 @@ class RestoreBlockReasonTest {
         val reason = restoreBlockReason(r, setOf("com.x.y"))
         assertNotNull(reason)
         assertTrue(reason!!.contains("com.x.y"))
+    }
+
+    // --- blocks on a change, and says which kind it is ----------------------–
+
+    private fun changedReport(
+        packages: List<String>,
+        labels: Map<String, String> = emptyMap()
+    ) = VerificationReport(
+        total = packages.size,
+        apps = packages.map { pkg ->
+            AppVerification(
+                label = labels[pkg] ?: pkg,
+                packageName = pkg,
+                partsChecked = 3,
+                corruptParts = emptyList(),
+                bytesReadable = 4096L,
+                hashMismatchedParts = listOf("Permissions.txt")
+            )
+        }
+    )
+
+    @Test
+    fun `an archive that changed since it was written blocks the restore`() {
+        // Readable, and not the archive the vault recorded. Restoring it would
+        // overwrite an install with unknown data instead of the known one.
+        val r = changedReport(listOf("bad.app"))
+        assertEquals(false, r.verifyReportAllowsRestore(setOf("bad.app")))
+        assertNotNull(restoreBlockReason(r, setOf("bad.app")))
+    }
+
+    @Test
+    fun `the changed reason names the app and the part, and does not claim damage`() {
+        val r = changedReport(listOf("bad.app"), mapOf("bad.app" to "Photos"))
+        val reason = restoreBlockReason(r, setOf("bad.app"))!!
+        assertTrue("should name the app: $reason", reason.contains("Photos"))
+        assertTrue("should name the part: $reason", reason.contains("Permissions.txt"))
+        assertTrue("should say changed: $reason", reason.contains("changed since"))
+        assertFalse(
+            "a readable archive must not be described as unreadable: $reason",
+            reason.contains("cannot be read back")
+        )
+    }
+
+    @Test
+    fun `a change outside the selection does not block`() {
+        val r = changedReport(listOf("not.selected"))
+        assertNull(restoreBlockReason(r, setOf("a.one")))
+    }
+
+    @Test
+    fun `a report that is both damaged and changed says both`() {
+        // Two different problems with two different fixes; a reason that named
+        // only one of them would send the user to the wrong repair.
+        val r = VerificationReport(
+            total = 1,
+            apps = listOf(
+                AppVerification(
+                    label = "Both",
+                    packageName = "both.app",
+                    partsChecked = 3,
+                    corruptParts = listOf("Data.shift"),
+                    bytesReadable = 0L,
+                    hashMismatchedParts = listOf("App.shift")
+                )
+            )
+        )
+        val reason = restoreBlockReason(r, setOf("both.app"))!!
+        assertTrue("should report the unreadable part: $reason", reason.contains("cannot be read back"))
+        assertTrue("should report the changed part: $reason", reason.contains("changed since"))
     }
 
     // --- does not block ----------------------------------------------------

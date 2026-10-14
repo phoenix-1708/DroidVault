@@ -133,6 +133,28 @@ class DeviceDataHistoryTest {
         assertEquals("Bluetooth.shift", AutomationRunner.deviceBackupFileFor(DeviceDataItem.BLUETOOTH))
     }
 
+    @Test fun theArchiveNameHasOneSpellingPerItem() {
+        // Three places name these archives: the skip/copy plan
+        // (`deviceBackupFileFor`), the Folders archive constant, and the item's own
+        // `archiveFile`, which is what a verification row is matched on. A restore
+        // gate that matches a row by a name the engine never reports finds nothing,
+        // decides "not in the plan", and lets a damaged archive through — silently,
+        // because finding nothing is not an error. One name per item, asserted
+        // rather than assumed (§2.29's lesson: a shared key is an interface).
+        DeviceDataItem.entries.forEach { item ->
+            assertEquals(
+                "$item must use the archive the pipeline checks for",
+                AutomationRunner.deviceBackupFileFor(item),
+                item.archiveFile
+            )
+            assertTrue(
+                "$item names a .shift archive, which is what the verifier walks",
+                item.archiveFile.endsWith(".shift")
+            )
+        }
+        assertEquals(BackupConfigFolders.ARCHIVE_FILE, DeviceDataItem.FOLDERS.archiveFile)
+    }
+
     @Test fun restoreOutputCoversEveryDeviceItem() {
         // The restore-side "did anything actually come back?" check only fires
         // for items that HAVE a documented output. A device item added later

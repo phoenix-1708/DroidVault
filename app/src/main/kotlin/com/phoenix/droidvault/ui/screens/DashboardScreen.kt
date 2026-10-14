@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.IconButton
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.ChangeCircle
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.ErrorOutline
@@ -178,6 +179,20 @@ fun DashboardScreen(
     // the card says so rather than showing a reassuring tick for work nobody did.
     val verification by viewModel.verification.collectAsStateWithLifecycle()
     val isVerifying by viewModel.isVerifying.collectAsStateWithLifecycle()
+    // The vault's change counter. A verdict is a measurement of a moment, and a
+    // run over the vault may have replaced anything it measured — so the epoch
+    // goes into the mapping and a report from before the last run is no longer
+    // allowed to render as "all readable".
+    val vaultEpoch by viewModel.vaultEpoch.collectAsStateWithLifecycle()
+    // What last changed the vault, so a finding that has outlived a run can say
+    // WHICH kind of run went over it — "an app backup has run since" rather than
+    // the weaker "something has". Null in a fresh process, which is itself the
+    // honest answer: nothing this launch saw wrote anything.
+    val lastVaultWriter by viewModel.lastVaultWriter.collectAsStateWithLifecycle()
+    // The clock, read when the verdict changes rather than on every frame: the
+    // age of a finding does not need to tick, and a state read per recomposition
+    // would make the row recompose for a number that has not changed since.
+    val nowMs = remember(verification, vaultEpoch) { System.currentTimeMillis() }
     // Two DISTINCT modes. Conflating them was a real bug: one flag both revealed
     // the per-card remove buttons AND opened the picker over them, so the remove
     // buttons could never be tapped, and "Add shortcut" closed the dialog.
@@ -205,9 +220,10 @@ fun DashboardScreen(
         VaultHero(
             overview = overview,
             appState = appState,
-            health = BackupHealth.from(verification),
+            health = BackupHealth.from(verification, vaultEpoch, nowMs, lastVaultWriter),
             verifying = isVerifying,
             hasDeviceArchives = deviceBackups.isNotEmpty(),
+            deviceArchiveCount = deviceBackups.size,
             onVerify = { viewModel.verifyVault(deviceData = true) },
             onReview = { onOpenMigrator(MigratorMode.MANAGE) }
         )
@@ -387,6 +403,7 @@ private fun VaultHero(
     verifying: Boolean,
     /** True when the vault holds device archives, so a device-only backup still counts. */
     hasDeviceArchives: Boolean,
+    deviceArchiveCount: Int,
     onVerify: () -> Unit,
     onReview: () -> Unit
 ) {
@@ -420,6 +437,14 @@ private fun VaultHero(
             Text(
                 when {
                     count == null -> "Reading your backups"
+                    // Device archives are BACKUPS. A user whose messages, call
+                    // logs and contacts are the only thing they have was told
+                    // "No backups yet" in the largest font on this screen — while
+                    // the same screen listed their device archives underneath and
+                    // rendered a live "Check" button for backups it had just
+                    // denied existed.
+                    count == 0 && hasDeviceArchives ->
+                        "${com.phoenix.droidvault.models.AppParts.count(deviceArchiveCount, "device backup")}"
                     count == 0 -> "No backups yet"
                     count == 1 -> "1 app backed up"
                     else -> "${com.phoenix.droidvault.models.AppParts.count(count, "app")} backed up"
@@ -430,7 +455,8 @@ private fun VaultHero(
             Spacer(Modifier.height(DvSpacing.xs))
             Text(
                 when {
-                    vaultKb == null || count == 0 -> "Pick what to save and it will live here"
+                    vaultKb == null -> "Pick what to save and it will live here"
+                    count == 0 && !hasDeviceArchives -> "Pick what to save and it will live here"
                     else -> "${formatVaultSize(vaultKb)} in the vault folder"
                 },
                 style = MaterialTheme.typography.bodyMedium,
@@ -533,7 +559,11 @@ private fun HealthRow(
 ) {
     val tint = when (health.severity) {
         HealthSeverity.HEALTHY -> dvAccent(DvRole.Tools)
-        HealthSeverity.DAMAGED, HealthSeverity.ERROR -> MaterialTheme.colorScheme.error
+        // A changed archive blocks a restore exactly as an unreadable one does, so
+        // it carries the same weight on screen. Only the sentence differs.
+        HealthSeverity.CHANGED,
+        HealthSeverity.DAMAGED,
+        HealthSeverity.ERROR -> MaterialTheme.colorScheme.error
         HealthSeverity.UNKNOWN -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     Row(
@@ -549,6 +579,7 @@ private fun HealthRow(
         Icon(
             imageVector = when (health.severity) {
                 HealthSeverity.HEALTHY -> Icons.Default.VerifiedUser
+                HealthSeverity.CHANGED -> Icons.Default.ChangeCircle
                 HealthSeverity.DAMAGED -> Icons.Default.ReportProblem
                 HealthSeverity.ERROR -> Icons.Default.ErrorOutline
                 HealthSeverity.UNKNOWN -> Icons.AutoMirrored.Filled.HelpOutline
@@ -571,6 +602,18 @@ private fun HealthRow(
                 Text(
                     it,
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            // Its own line, quieter than the one above: the names are what the
+            // user acts on, so how long the finding has stood and what has run
+            // since must not push them past an ellipsis.
+            health.footnote?.takeIf { it.isNotBlank() && !verifying }?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis

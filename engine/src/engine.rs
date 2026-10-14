@@ -1,7 +1,8 @@
 use crate::{
-    archive, command, device, install, partitions, protocol, targets, tools, transfer, verify,
+    archive, checksum, command, device, install, manifest, partitions, protocol, quiesce, restore,
+    targets, tools, transfer, verify,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,10 +30,90 @@ struct Meta {
     app_size: String,
     data_size: String,
     media_size: String,
+    /// Per-ARCHIVE sizes in KB, one per root a part writes.
+    ///
+    /// `DataExtSize` and `MediaOBBSize` are totals over several archives, and
+    /// the restore space gate is asked about ONE archive at a time. Gating each
+    /// one against the total charged it for its siblings' worth of space too —
+    /// two to three times what the extraction needs — so a nearly-full device
+    /// fell back to the non-reversible in-place path far earlier than it had to.
+    /// Per-archive, the gate asks what it is actually about to write (§4.27).
+    ///
+    /// Empty means this build did not record it (an archive from before this
+    /// existed), and the gate falls back to the total in that case — the
+    /// over-reserving behaviour is the safe direction to keep for old backups.
+    data_root_kb: String,
+    user_de_kb: String,
+    ext_data_kb: String,
+    media_root_kb: String,
+    obb_kb: String,
     ssaid: String,
+    /// Whether the app was stopped while its data was read. `"1"` only when a
+    /// run OBSERVED a quiet app (nothing running, or a successful force-stop);
+    /// `"0"` when the app was running and could not be stopped, so the archive
+    /// may hold a mid-write view of its database or preferences. Empty means no
+    /// run has recorded it (an archive from before this existed) — which is not
+    /// the same as "consistent", and must never be rendered as one.
+    consistent: String,
 }
 
 impl Meta {
+    /// The space one archive's extraction is expected to need, in KB.
+    ///
+    /// Per-archive when this build recorded it, the part total otherwise. Never
+    /// both added: they measure the same trees, and summing them would charge
+    /// the gate for twice the work.
+    fn staging_kb(&self, root: &Path) -> u64 {
+        let (per_archive, total) = if root == Path::new("/data/data") {
+            (&self.data_root_kb, &self.data_size)
+        } else if root == Path::new("/data/user_de/0") {
+            (&self.user_de_kb, &self.data_size)
+        } else if root == Path::new("/data/media/0/Android/data") {
+            (&self.ext_data_kb, &self.data_size)
+        } else if root == Path::new("/data/media/0/Android/media") {
+            (&self.media_root_kb, &self.media_size)
+        } else {
+            (&self.obb_kb, &self.media_size)
+        };
+        let measured = restore::recorded_kb(per_archive);
+        if measured > 0 {
+            measured
+        } else {
+            restore::recorded_kb(total)
+        }
+    }
+
+    /// Record one archive's measured size, named by the archive it backs up.
+    ///
+    /// Keyed on the archive's file name because that is what the restore loop
+    /// iterates — one spelling, used by the backup that writes the size, the
+    /// `Meta.txt` that carries it and the gate that reads it back. A key name
+    /// shared between a writer and a reader is an interface, not a detail.
+    fn set_archive_kb(&mut self, archive_name: &str, kb: String) {
+        match archive_name {
+            "Data" => self.data_root_kb = kb,
+            "UserDe" => self.user_de_kb = kb,
+            "ExtData" => self.ext_data_kb = kb,
+            "Media" => self.media_root_kb = kb,
+            "Obb" => self.obb_kb = kb,
+            _ => {}
+        }
+    }
+
+    /// Carry the per-archive sizes forward from a run that did not re-read them.
+    ///
+    /// `next` is built from `Meta::default()`, so a part this run skipped has to
+    /// state explicitly that it is keeping what is already recorded. Without
+    /// this, a backup that skipped every part would blank the per-archive sizes
+    /// and every later restore would quietly fall back to the part total.
+    fn carry_archive_kb(&mut self, from: &Meta) {
+        self.data_root_kb = from.data_root_kb.clone();
+        self.user_de_kb = from.user_de_kb.clone();
+        self.ext_data_kb = from.ext_data_kb.clone();
+        self.media_root_kb = from.media_root_kb.clone();
+        self.obb_kb = from.obb_kb.clone();
+    }
+
     fn read(dir: &Path) -> Self {
         let Ok(text) = fs::read_to_string(dir.join("Meta.txt")) else {
             return Self::default();
@@ -44,7 +125,13 @@ impl Meta {
                 "AppSize" => out.app_size = value.to_string(),
                 "DataExtSize" => out.data_size = value.to_string(),
                 "MediaOBBSize" => out.media_size = value.to_string(),
+                "DataSize" => out.data_root_kb = value.to_string(),
+                "UserDeSize" => out.user_de_kb = value.to_string(),
+                "ExtDataSize" => out.ext_data_kb = value.to_string(),
+                "MediaSize" => out.media_root_kb = value.to_string(),
+                "ObbSize" => out.obb_kb = value.to_string(),
                 "SSAID" => out.ssaid = value.to_string(),
+                "Consistent" => out.consistent = value.to_string(),
                 _ => {}
             }
         }
@@ -65,7 +152,7 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "--restore-debloat" => {
-            tools::restore_debloat(arg(1));
+            tools::restore_debloat(arg(1), arg(2));
             Ok(())
         }
         "--systemize" => {
@@ -105,11 +192,21 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
             write_ors(arg(1), arg(2));
             Ok(())
         }
+        "--clear-ors" => {
+            clear_ors();
+            Ok(())
+        }
         // Archive verification. Exists because a backup that cannot be read
         // back is discovered at restore time, which is the worst moment: the
         // device may already be wiped or the ROM already flashed.
         "--verify-apps" => verify::verify_apps(arg(1)),
         "--verify-device" => verify::verify_device(arg(1)),
+        // The vault index. `--check-manifest` answers "is everything still
+        // here, at the size it was written?" without reading an archive, which
+        // is the question a user asks far more often than the content one;
+        // `--write-manifest` rebuilds it (a backup run does this on its way out).
+        "--check-manifest" => manifest::check_manifest(arg(1)),
+        "--write-manifest" => manifest::write_manifest(arg(1)),
         // Cross-device transfer. The archive format is plain gzip tar handled
         // by the platform tar; this only drives it, measures it, and moves the
         // results — with progress and cancellation the shell pipeline lacked.
@@ -249,6 +346,24 @@ fn run_apps(restore: bool, raw_components: &str, base_path: &str) -> Result<(), 
         verifier_mode(true);
     }
 
+    // One process-list read for the whole run.
+    //
+    // An app that is running can write into its own data directory while tar
+    // streams it (backup), and holds the old tree open while its replacement is
+    // moved into place (restore), so both directions need to know what is
+    // running: measured at ~20 ms for 830 processes on the reference device,
+    // paid once per run rather than once per app.
+    let running = quiesce::running_packages();
+    // Free-space readings, one per target root per run (see
+    // `restore::available_kb_cached` for why a run-scoped value is enough).
+    let mut free_kb: HashMap<String, u64> = HashMap::new();
+    if restore {
+        // Anything a previous run was killed in the middle of is repaired
+        // BEFORE this run reads the same positions. Silence here is what makes
+        // a half-finished restore invisible, so the pass reports what it did.
+        restore::heal_journal();
+    }
+
     for (index, app) in apps.iter().enumerate() {
         if command::cancelled() {
             protocol::raw("ACTION:CANCELLED");
@@ -278,9 +393,9 @@ fn run_apps(restore: bool, raw_components: &str, base_path: &str) -> Result<(), 
         );
         let dir = base.join(&app.kind).join(&app.label);
         let result = if restore {
-            restore_app(app, &dir, comps)
+            restore_app(app, &dir, comps, &running, &mut free_kb)
         } else {
-            backup_app(app, &dir, comps)
+            backup_app(app, &dir, comps, &running)
         };
         if let Err(error) = result {
             if command::cancelled() {
@@ -320,6 +435,21 @@ fn run_apps(restore: bool, raw_components: &str, base_path: &str) -> Result<(), 
     if !command::cancelled() {
         protocol::info("Almost Done, Please Wait...");
         protocol::global_done(total_weight, started.elapsed().as_secs());
+        // Index the vault as it now stands, so `--check-manifest` has something
+        // to compare against. Skipped while cancelled: an index built over a run
+        // that was stopped mid-write would record a half-written archive as the
+        // vault's own shape. Cheap by construction — the walk reads the sidecars
+        // and never an archive.
+        //
+        // The vault ROOT, not `base`: `app_base` hands back `<vault>/Apps`, and
+        // the index covers the whole vault including Device/ and the mirrors.
+        // Found on device — `rebuild(&base)` looked for `Apps/Apps/User/...`,
+        // found nothing, and quietly declined to write an index after every
+        // single run ("no archives found in this folder") while the vault it had
+        // just written to was sitting right there.
+        if let Some(vault) = base.parent() {
+            manifest::rebuild(vault);
+        }
     }
     Ok(())
 }
@@ -388,7 +518,12 @@ pub(crate) fn retained_part(wanted: bool, earlier_archive_exists: bool) -> Retai
     }
 }
 
-fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<(), String> {
+fn backup_app(
+    app: &targets::Target,
+    dir: &Path,
+    comps: Components,
+    running: &BTreeSet<String>,
+) -> Result<(), String> {
     fs::create_dir_all(dir).map_err(|e| format!("Cannot create app backup folder: {e}"))?;
     let old = Meta::read(dir);
 
@@ -426,6 +561,10 @@ fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<()
     }
 
     let mut next = Meta::default();
+    // Whether this app was stopped before its data was read. `None` means this
+    // run read nothing (every part was already up to date), and the caller then
+    // keeps whatever the archive that HOLDS the data recorded.
+    let mut consistency: Option<quiesce::Quiesce> = None;
     if comps.has(1) {
         let dest = dir.join("App.shift");
         if old.app_size != app.app_size.to_string() || !dest.exists() {
@@ -448,11 +587,15 @@ fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<()
                 })
                 .collect::<Vec<_>>();
             match archive::pack_files(&apks, &dest) {
-                Ok(true) if archive::archive_valid(&dest) => {
+                Ok(packed) if packed.wrote() && archive::archive_valid(&dest) => {
                     next.app_size = app.app_size.to_string();
                     protocol::part(&app.package, "App", 2, "");
                 }
                 _ => {
+                    // The sidecar goes with the archive it describes. Leaving it
+                    // behind would make the next quick verify report a file that
+                    // is not there as merely changed.
+                    let _ = fs::remove_file(checksum::sidecar_for(&dest));
                     let _ = fs::remove_file(&dest);
                     protocol::part(&app.package, "App", 4, "APK archive failed validation");
                 }
@@ -474,6 +617,9 @@ fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<()
                 && !dir.join(format!("{name}.shift")).is_file()
         });
         if old.data_size != app.data_size.to_string() || missing_source_archive {
+            // About to read the app's data: stop it first if it is running, or
+            // record honestly that the archive may hold a mid-write view.
+            quiesce::ensure_quiet(&app.package, running, &mut consistency);
             protocol::part(&app.package, "Data", 1, "");
             let mut any = false;
             for (root, name) in archives {
@@ -482,9 +628,13 @@ fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<()
                     let output = dir.join(format!("{name}.shift"));
                     if matches!(
                         archive::pack_path(Path::new(root), Path::new(&app.package), &output),
-                        Ok(true)
+                        Ok(packed) if packed.wrote()
                     ) {
                         any = true;
+                        // After the pack, so the tree is still in page cache. This
+                        // is what the restore space gate charges for THIS archive
+                        // rather than for the whole part.
+                        next.set_archive_kb(name, archive::tree_kb(&source).to_string());
                     }
                 }
             }
@@ -496,6 +646,7 @@ fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<()
             }
         } else {
             next.data_size = old.data_size.clone();
+            next.carry_archive_kb(&old);
             protocol::part(&app.package, "Data", 3, "already backed up");
         }
     }
@@ -503,7 +654,12 @@ fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<()
     if comps.has(3) {
         protocol::part(&app.package, "Perm", 1, "");
         let permissions = get_permissions(&app.package);
-        if fs::write(dir.join("Permissions.txt"), permissions).is_ok() {
+        let snapshot = dir.join("Permissions.txt");
+        if fs::write(&snapshot, permissions).is_ok() {
+            // Small, engine-written and restore-critical: a digest here is what
+            // lets a deep verify tell a truncated snapshot from a shorter
+            // permission list.
+            checksum::record(&snapshot);
             protocol::part(&app.package, "Perm", 2, "");
         } else {
             protocol::part(&app.package, "Perm", 4, "permission snapshot write failed");
@@ -543,18 +699,24 @@ fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<()
             }
             MediaAction::SkipUnchanged => {
                 next.media_size = old.media_size.clone();
+                next.carry_archive_kb(&old);
                 protocol::part(&app.package, "Media", 3, "already backed up");
             }
             MediaAction::Pack => {
+                // Same rule as Data, and needed independently: Media & OBB can be
+                // selected without Data, and the app writes there too.
+                quiesce::ensure_quiet(&app.package, running, &mut consistency);
                 protocol::part(&app.package, "Media", 1, "");
                 let mut any = false;
                 for (root, name) in present {
+                    let source = Path::new(root).join(&app.package);
                     let output = dir.join(format!("{name}.shift"));
                     if matches!(
                         archive::pack_path(Path::new(root), Path::new(&app.package), &output),
-                        Ok(true)
+                        Ok(packed) if packed.wrote()
                     ) {
                         any = true;
+                        next.set_archive_kb(name, archive::tree_kb(&source).to_string());
                     }
                 }
                 if any {
@@ -576,12 +738,25 @@ fn backup_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<()
             protocol::part(&app.package, "AndID", 3, "no SSAID");
         }
     }
+    // Only a run that READ data may speak for its consistency. A backup that
+    // skipped every part keeps the flag the archive that holds the data already
+    // carries, instead of claiming a quiesce it never performed.
+    next.consistent = match consistency {
+        Some(outcome) => outcome.meta_value().to_string(),
+        None => old.consistent.clone(),
+    };
     write_meta(app, dir, &next)?;
     protocol::done_pkg(false, &app.package);
     Ok(())
 }
 
-fn restore_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<(), String> {
+fn restore_app(
+    app: &targets::Target,
+    dir: &Path,
+    comps: Components,
+    running: &BTreeSet<String>,
+    free_kb: &mut HashMap<String, u64>,
+) -> Result<(), String> {
     fs::create_dir_all(command::TEMP_DIR).map_err(|e| e.to_string())?;
     let app_archive = dir.join("App.shift");
     if comps.has(1)
@@ -657,6 +832,11 @@ fn restore_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<(
             (4, "Media", "/data/media/0/Android/media", "Media.shift"),
             (4, "Media", "/data/media/0/Android/obb", "Obb.shift"),
         ];
+        // Once per app, before the first tree is replaced: an app that is
+        // running holds the old data open and writes into the new tree while it
+        // is placed — the interleaved mix the fresh-install path already guards
+        // against with `cmd package disable`, on the path that did not.
+        let mut quiet: Option<quiesce::Quiesce> = None;
         for (component, display, target, archive_name) in restore_sets {
             if !comps.has(component) {
                 continue;
@@ -666,13 +846,47 @@ fn restore_app(app: &targets::Target, dir: &Path, comps: Components) -> Result<(
                 continue;
             }
             protocol::part(&app.package, display, 1, "");
-            let result = archive::unpack(&archive_path, Path::new(target));
+            quiesce::ensure_quiet(&app.package, running, &mut quiet);
+            // THIS archive's recorded size gates THIS archive's staging decision;
+            // the run's own free-space reading is read once per root and reused
+            // (restore::available_kb_cached).
+            //
+            // Per-archive, because the part totals cover several roots: gating
+            // `Data.shift` on `DataExtSize` charged it for `/data/user_de/0` as
+            // well, and `ExtData.shift` — which neither total accounts for at
+            // all — was charged against `DataExtSize` too. Every Data archive
+            // asked for two to three times what it was about to write, so a
+            // nearly-full device fell back to the non-reversible in-place path
+            // long before it had to. A gate must budget what the code actually
+            // writes (§4.27).
+            let needed = meta.staging_kb(Path::new(target));
+            let available = restore::available_kb_cached(free_kb, Path::new(target), needed);
+            let outcome = restore::restore_into(
+                Path::new(target),
+                &app.package,
+                &uid,
+                &archive_path,
+                needed,
+                available,
+            );
             if command::cancelled() {
                 return Err("operation cancelled".into());
             }
-            match result {
-                Ok(true) => protocol::part(&app.package, display, 2, ""),
-                _ => protocol::part(&app.package, display, 4, "archive extraction failed"),
+            if outcome.ok() {
+                // The part's own states stay exactly as they were: the app
+                // renders a success with an empty reason, and which placement
+                // was used belongs in the log, not in the progress caption.
+                protocol::raw(&format!(
+                    "NOTE:RESTORE|{}|{}|{display}",
+                    match outcome {
+                        restore::RestoreOutcome::Staged => "staged",
+                        _ => "inplace",
+                    },
+                    app.package
+                ));
+                protocol::part(&app.package, display, 2, "");
+            } else {
+                protocol::part(&app.package, display, 4, &outcome.reason());
             }
         }
         if comps.has(2)
@@ -771,6 +985,26 @@ fn write_meta(app: &targets::Target, dir: &Path, meta: &Meta) -> Result<(), Stri
     if !meta.ssaid.is_empty() {
         text.push_str(&format!("SSAID={}\n", meta.ssaid));
     }
+    // Per-archive sizes, written under the names the restore gate reads them by
+    // and the app already greps for (`DataSize`, `ExtDataSize`, `MediaSize`,
+    // `ObbSize` — plus `UserDeSize`, which the app's grep list is extended to
+    // match). A writer that does not emit what its reader looks for is a silent
+    // contract break: the reader's per-archive fallback could never fire, because
+    // the combined field is always present.
+    for (key, value) in [
+        ("DataSize", &meta.data_root_kb),
+        ("UserDeSize", &meta.user_de_kb),
+        ("ExtDataSize", &meta.ext_data_kb),
+        ("MediaSize", &meta.media_root_kb),
+        ("ObbSize", &meta.obb_kb),
+    ] {
+        if !value.is_empty() {
+            text.push_str(&format!("{key}={value}\n"));
+        }
+    }
+    if !meta.consistent.is_empty() {
+        text.push_str(&format!("Consistent={}\n", meta.consistent));
+    }
     if app.kind == "System" {
         let dump = command::text("dumpsys", ["package", &app.package]);
         if let Some(path) = dump
@@ -787,7 +1021,25 @@ fn write_meta(app: &targets::Target, dir: &Path, meta: &Meta) -> Result<(), Stri
             }
         }
     }
-    fs::write(dir.join("Meta.txt"), text).map_err(|e| format!("Cannot write backup metadata: {e}"))
+    // Streamed into a temp path and renamed over the destination, like every
+    // other writer in this engine (§4.23). Writing in place was the one exception
+    // left, and it is the worst possible one here: `verify::scan_apps` skips a
+    // directory whose `Meta.txt` lost both `Name=` and `Package=`, so a kill
+    // mid-write made the app vanish from every `--verify-apps` row and from the
+    // index walk — and the digest recorded on the next line could never catch it,
+    // because the app is no longer scanned at all.
+    let path = dir.join("Meta.txt");
+    let temp = dir.join("Meta.txt.tmp");
+    fs::write(&temp, text).map_err(|e| format!("Cannot write backup metadata: {e}"))?;
+    if let Err(e) = fs::rename(&temp, &path) {
+        let _ = fs::remove_file(&temp);
+        return Err(format!("Cannot write backup metadata: {e}"));
+    }
+    // Meta.txt names the archive and carries the recorded sizes the restore
+    // space gate reads, so it is worth a digest like any other engine-written
+    // file.
+    checksum::record(&path);
+    Ok(())
 }
 
 /// Per-app SSAID store. Android 14+ holds it as ABX (magic `ABX\0`), not text.
@@ -924,36 +1176,60 @@ fn write_ssaid(package: &str, value: &str) -> bool {
 
     // Stage, then swap in. A half-written system settings file is worse than a
     // failed restore, so the live file is only ever replaced by a completed
-    // re-encode, and is restored from a backup if any step after that fails.
+    // re-encode.
+    //
+    // The re-encode is staged in the target's OWN directory and finished with a
+    // rename, never copied over the destination. This is invariant 23, and the
+    // copy here broke it in the worst possible place: `fs::copy` opens the
+    // destination O_TRUNC, so the original `settings_ssaid.xml` is destroyed at
+    // the START of the copy, not the end — measured on the reference device,
+    // a killed copy leaves the live file short and the old bytes already gone.
+    // The backup could not save it, because it is only read when `fs::copy`
+    // RETURNS an error: a SIGKILL or a power loss in that window returns
+    // nothing, so no code path ever runs the restore. The result is a truncated
+    // ABX settings file, which SettingsProvider cannot parse — for EVERY app's
+    // SSAID, from one interrupted write of one app's.
+    //
+    // A rename is atomic within one filesystem, and `/data/local/tmp` and
+    // `/data/system` are the same device (measured: both dev=65070) — but
+    // staging in the target directory does not rely on that, and keeps the
+    // rename inside the directory the file lives in.
     let pid = std::process::id();
+    let dir = path.parent().unwrap_or(Path::new("/data/system/users/0"));
+    let staged = dir.join(format!(".settings_ssaid.{pid}.tmp"));
     let xml_tmp = format!("/data/local/tmp/ssaid_{pid}.xml");
-    let out_tmp = format!("/data/local/tmp/ssaid_{pid}.abx");
-    let backup = format!("/data/local/tmp/ssaid_backup_{pid}");
-    let staged = if abx {
+    let encoded = if abx {
         fs::write(&xml_tmp, format!("{rewritten}\n")).is_ok()
-            && command::status("xml2abx", [&xml_tmp, &out_tmp])
+            && command::status(
+                "xml2abx",
+                [&xml_tmp, &staged.to_string_lossy().into_owned()],
+            )
     } else {
-        fs::write(&out_tmp, format!("{rewritten}\n")).is_ok()
+        fs::write(&staged, format!("{rewritten}\n")).is_ok()
     };
-    if !staged || fs::copy(path, &backup).is_err() {
+    if !encoded {
         let _ = fs::remove_file(&xml_tmp);
-        let _ = fs::remove_file(&out_tmp);
-        return false;
-    }
-    if fs::copy(&out_tmp, path).is_err() {
-        let _ = fs::copy(&backup, path);
-        let _ = fs::remove_file(&xml_tmp);
-        let _ = fs::remove_file(&out_tmp);
+        let _ = fs::remove_file(&staged);
         return false;
     }
     // Ownership and mode must match the original or SettingsProvider will
-    // refuse to parse its own file.
-    let _ = command::status("chown", ["system:system", path.to_string_lossy().as_ref()]);
-    let _ = command::status("chmod", ["600", path.to_string_lossy().as_ref()]);
-    let _ = command::status("restorecon", [path.to_string_lossy().as_ref()]);
+    // refuse to parse its own file. Set on the STAGED file, before it becomes
+    // live, so the live file is never briefly wrong.
+    let _ = command::status(
+        "chown",
+        ["system:system", staged.to_string_lossy().as_ref()],
+    );
+    let _ = command::status("chmod", ["600", staged.to_string_lossy().as_ref()]);
+    let _ = command::status("restorecon", [staged.to_string_lossy().as_ref()]);
+    // The whole point: one atomic act. Before it the old file is intact and
+    // complete; after it the new one is. There is no state in between where
+    // SettingsProvider can read a partial file.
+    if fs::rename(&staged, path).is_err() {
+        let _ = fs::remove_file(&xml_tmp);
+        let _ = fs::remove_file(&staged);
+        return false;
+    }
     let _ = fs::remove_file(&xml_tmp);
-    let _ = fs::remove_file(&out_tmp);
-    let _ = fs::remove_file(&backup);
     true
 }
 
@@ -1086,15 +1362,6 @@ fn restore_ownership() {
     let Ok(lines) = fs::read_to_string(&queue) else {
         return;
     };
-    let data_gid = command::text("stat", ["-c", "%g", "/data/media/0/Android/data"])
-        .trim()
-        .to_string();
-    let media_gid = command::text("stat", ["-c", "%g", "/data/media/0/Android/media"])
-        .trim()
-        .to_string();
-    let obb_gid = command::text("stat", ["-c", "%g", "/data/media/0/Android/obb"])
-        .trim()
-        .to_string();
     for line in lines.lines() {
         if command::cancelled() {
             protocol::raw("ACTION:CANCELLED");
@@ -1106,30 +1373,10 @@ fn restore_ownership() {
         if !command::valid_package(package) || !uid.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        for path in [
-            format!("/data/data/{package}"),
-            format!("/data/user_de/0/{package}"),
-        ] {
-            let _ = command::status("chown", ["-hR", &format!("{uid}:{uid}"), &path]);
-        }
-        for (root, gid) in [
-            ("/data/media/0/Android/data", &data_gid),
-            ("/data/media/0/Android/media", &media_gid),
-            ("/data/media/0/Android/obb", &obb_gid),
-        ] {
-            if !gid.is_empty() {
-                let _ = command::status(
-                    "chown",
-                    ["-hR", &format!("{uid}:{gid}"), &format!("{root}/{package}")],
-                );
-            }
-        }
-        for path in [
-            format!("/data/data/{package}"),
-            format!("/data/user_de/0/{package}"),
-        ] {
-            let _ = command::status("restorecon", ["-R", &path]);
-        }
+        // Ownership and labels live in ONE implementation, shared with the
+        // journal's recovery pass: two copies of this rule drift, and the copy
+        // that drifts silently is the one that only runs after a crash.
+        restore::fix_ownership_and_labels(package, uid);
         let _ = command::status(
             "rm",
             [
@@ -1146,6 +1393,11 @@ fn restore_ownership() {
             ],
         );
         let _ = command::status("cmd", ["package", "enable", package]);
+        // The tree is now usable, so this package's journal entry has served its
+        // purpose. Until this line runs, a killed run leaves the entry behind and
+        // the next run finishes the fix instead of leaving root-owned,
+        // mislabeled data the app cannot read.
+        restore::clear_pending(package);
     }
     let _ = fs::remove_file(queue);
 }
@@ -1265,14 +1517,42 @@ fn kill_jobs() {
     let _ = fs::remove_file(path);
 }
 
+/// Where recovery looks for the open-recovery script, on every ROM this app has
+/// met. Named once because writing and REMOVING must agree: a script cleared at
+/// three addresses and written at four would leave the destructive one behind.
+const ORS_LOCATIONS: [&str; 3] = [
+    "/cache/recovery",
+    "/data/cache/recovery",
+    "/metadata/recovery",
+];
+
+/// Remove every `openrecoveryscript` we may have written.
+///
+/// This is the other half of `--ors`, and it is the half that was missing. A
+/// script holding `format data` / `wipe data` / `install` / `reboot` survived
+/// the user backing out of the wizard, leaving the Flash tab, and the process
+/// dying — and then fired on the NEXT recovery boot for any reason whatsoever,
+/// with nothing on screen saying it was armed. The wizard arms a destructive
+/// action; everything that walks back from it must disarm it.
+pub fn clear_ors() -> bool {
+    let mut cleared = false;
+    for location in ORS_LOCATIONS {
+        let path = Path::new(location).join("openrecoveryscript");
+        if path.exists() && fs::remove_file(&path).is_ok() {
+            cleared = true;
+        }
+    }
+    if cleared {
+        let _ = command::status("sync", std::iter::empty::<&str>());
+    }
+    cleared
+}
+
 fn write_ors(script: &str, reboot: &str) {
     let _ = command::status("mount", ["-o", "rw,remount", "/cache"]);
     let _ = command::status("mount", ["-o", "rw,remount", "/metadata"]);
-    for location in [
-        "/cache/recovery",
-        "/data/cache/recovery",
-        "/metadata/recovery",
-    ] {
+    let mut wrote_any = false;
+    for location in ORS_LOCATIONS {
         let _ = fs::create_dir_all(location);
         let mut content = script.to_string();
         if !reboot.is_empty() && reboot != "none" {
@@ -1281,13 +1561,166 @@ fn write_ors(script: &str, reboot: &str) {
         let path = Path::new(location).join("openrecoveryscript");
         if fs::write(&path, content).is_ok() {
             let _ = command::status("chmod", ["644", path.to_string_lossy().as_ref()]);
+            wrote_any = true;
         }
+    }
+    // Say so when nothing landed. Every write here used to be `let _ =`, so the
+    // engine exited 0 and the wizard advanced to "Everything is prepared" with
+    // no script on disk — recovery would boot and do nothing, or worse, run a
+    // STALE script from an earlier pass (invariant 22).
+    if !wrote_any {
+        protocol::error(
+            "Could not write the recovery script. Check that /cache and /metadata \
+             are mounted, then try again.",
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MediaAction, media_action};
+    use super::{MediaAction, Meta, app_base, media_action};
+    use std::path::Path;
+
+    // --- the space gate asks about ONE archive, not the whole part ----------
+
+    #[test]
+    fn each_archive_is_gated_against_its_own_size() {
+        // The part totals cover several roots. Charging every Data archive the
+        // `DataExtSize` total asked each of them for its siblings' space too, so
+        // a nearly-full device fell back to the non-reversible in-place path far
+        // earlier than it had to — and `ExtData.shift`, which NEITHER total
+        // accounts for, was charged against `DataExtSize` regardless.
+        let meta = Meta {
+            data_size: "100000".into(),
+            media_size: "80000".into(),
+            data_root_kb: "60000".into(),
+            user_de_kb: "30000".into(),
+            ext_data_kb: "4000".into(),
+            media_root_kb: "70000".into(),
+            obb_kb: "9000".into(),
+            ..Meta::default()
+        };
+        assert_eq!(meta.staging_kb(Path::new("/data/data")), 60_000);
+        assert_eq!(meta.staging_kb(Path::new("/data/user_de/0")), 30_000);
+        assert_eq!(
+            meta.staging_kb(Path::new("/data/media/0/Android/data")),
+            4_000,
+            "ExtData is its own archive and neither part total describes it"
+        );
+        assert_eq!(
+            meta.staging_kb(Path::new("/data/media/0/Android/media")),
+            70_000
+        );
+        assert_eq!(
+            meta.staging_kb(Path::new("/data/media/0/Android/obb")),
+            9_000
+        );
+        // The per-archive figures are a split of the totals, so what the gate
+        // charges across a whole part must not exceed the total it came from —
+        // the property that makes "per-archive" a split rather than a second
+        // charge on top.
+        let data_charged: u64 = [
+            "/data/data",
+            "/data/user_de/0",
+            "/data/media/0/Android/data",
+        ]
+        .iter()
+        .map(|root| meta.staging_kb(Path::new(root)))
+        .sum();
+        let media_charged: u64 = ["/data/media/0/Android/media", "/data/media/0/Android/obb"]
+            .iter()
+            .map(|root| meta.staging_kb(Path::new(root)))
+            .sum();
+        assert_eq!(data_charged, 94_000);
+        assert!(
+            data_charged <= 100_000,
+            "the Data part must not be charged twice"
+        );
+        assert!(
+            media_charged <= 80_000,
+            "the Media part must not be charged twice"
+        );
+    }
+
+    #[test]
+    fn an_archive_from_before_per_archive_sizes_falls_back_to_the_part_total() {
+        // Every existing backup records only the combined fields. The fallback
+        // keeps the old over-reserving behaviour for those, which is the safe
+        // direction to be wrong in, rather than charging nothing and staging
+        // into a full disk.
+        let meta = Meta {
+            data_size: "100000".into(),
+            media_size: "80000".into(),
+            ..Meta::default()
+        };
+        assert_eq!(meta.staging_kb(Path::new("/data/data")), 100_000);
+        assert_eq!(meta.staging_kb(Path::new("/data/user_de/0")), 100_000);
+        assert_eq!(
+            meta.staging_kb(Path::new("/data/media/0/Android/media")),
+            80_000
+        );
+        // A recorded 0 is "not measured", not "empty" — so it falls back too
+        // rather than charging the extraction nothing (§4.39).
+        let measured_zero = Meta {
+            data_size: "100000".into(),
+            data_root_kb: "0".into(),
+            ..Meta::default()
+        };
+        assert_eq!(measured_zero.staging_kb(Path::new("/data/data")), 100_000);
+        // And a Meta.txt with no sizes at all is 0, which `should_stage` reads
+        // as "stage anyway" — the pre-existing unmeasured rule, unchanged.
+        assert_eq!(Meta::default().staging_kb(Path::new("/data/data")), 0);
+    }
+
+    #[test]
+    fn per_archive_sizes_survive_a_meta_round_trip() {
+        // A writer that does not emit what its reader looks for is a silent
+        // contract break, and this one was already half-built: the app's grep
+        // listed `DataSize`/`ExtDataSize`/`MediaSize`/`ObbSize` while the engine
+        // wrote none of them, so the reader's per-archive fallback could never
+        // fire.
+        let dir = std::env::temp_dir().join(format!("dv-meta-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = "Name=Demo\nPackage=com.demo\nAppSize=100\nDataExtSize=300\nMediaOBBSize=200\nDataSize=150\nUserDeSize=150\nExtDataSize=7\nMediaSize=180\nObbSize=20\n";
+        std::fs::write(dir.join("Meta.txt"), text).unwrap();
+
+        let meta = Meta::read(&dir);
+        assert_eq!(meta.data_root_kb, "150");
+        assert_eq!(meta.user_de_kb, "150");
+        assert_eq!(meta.ext_data_kb, "7");
+        assert_eq!(meta.media_root_kb, "180");
+        assert_eq!(meta.obb_kb, "20");
+        // The combined fields still win where they are the better answer, and the
+        // reader's own fallback arithmetic still reproduces the totals.
+        assert_eq!(
+            meta.data_root_kb.parse::<u64>().unwrap() + meta.ext_data_kb.parse::<u64>().unwrap(),
+            157,
+            "the app reconstructs DataExtSize as DataSize + ExtDataSize"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- the vault root is not the app base --------------------------------
+
+    #[test]
+    fn the_app_base_is_the_vaults_apps_directory() {
+        // `run_apps` works in `<vault>/Apps`, and anything that covers the WHOLE
+        // vault has to step back one level. Getting this wrong is silent:
+        // `manifest::rebuild(<vault>/Apps)` looks for `Apps/Apps/User/...`, finds
+        // nothing, and declines to write an index — which is what shipped for one
+        // build and only device evidence caught.
+        let base = app_base("/storage/emulated/0/DroidVault").unwrap();
+        assert_eq!(base, Path::new("/storage/emulated/0/DroidVault/Apps"));
+        assert_eq!(
+            base.parent().unwrap(),
+            Path::new("/storage/emulated/0/DroidVault"),
+            "the vault root the index is written into"
+        );
+        // A trailing slash and a bare root must both land in the same place.
+        assert_eq!(app_base("/v/").unwrap(), Path::new("/v/Apps"));
+        assert_eq!(app_base("/").unwrap().parent().unwrap(), Path::new("/"));
+    }
 
     // --- the bug: absence reported as failure ------------------------------
 

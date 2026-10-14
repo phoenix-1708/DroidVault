@@ -72,7 +72,21 @@ object PermissionChecker {
         val appopUsageStats: Boolean,
         val postNotifications: Boolean,
         val deviceidleWhitelisted: Boolean,
-        val engineMatch: Boolean,
+        /**
+         * `true` the deployed engine matches this build, `false` it does not,
+         * and **`null` there is no answer** — the probe timed out or the shell
+         * failed.
+         *
+         * The third state is load-bearing. The probe used to run under
+         * `withTimeoutOrNull(10_000L)` and then `?: false`, which reads a
+         * timeout as "the engine is stale". On a busy phone — which is exactly
+         * when someone opens Settings to check why a run misbehaved — hashing
+         * the engine through the shell can exceed ten seconds, so a perfectly
+         * healthy engine rendered as a red "Backup engine up to date: ✗". That is
+         * invariant 39's rule at the other end of the stick: a timeout is not an
+         * answer, and it must not be laundered into a verdict.
+         */
+        val engineMatch: Boolean?,
         /**
          * "Allow restricted settings" is ON (or the OS predates it).
          *
@@ -158,14 +172,16 @@ object PermissionChecker {
         }
         val deviceidleWhitelisted = isWhitelisted(idleRaw, pkg)
 
+        // No answer is NOT a mismatch: a timeout here would otherwise render a healthy
+        // engine as stale on exactly the busy phones where someone goes looking.
         val engineMatch = try {
             kotlinx.coroutines.runBlocking {
                 kotlinx.coroutines.withTimeoutOrNull(10_000L) {
                     BackendInstaller.isEngineUpToDate(context)
                 }
-            } ?: false
+            }
         } catch (_: Exception) {
-            false
+            null
         }
 
         val restrictedRaw = try {

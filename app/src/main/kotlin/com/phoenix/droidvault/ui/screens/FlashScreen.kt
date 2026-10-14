@@ -127,6 +127,10 @@ fun FlashTab(
     var customImgPath by remember { mutableStateOf("") }
     var allPartitions by remember { mutableStateOf(listOf<String>()) }
     var backedUpImages by remember { mutableStateOf(listOf<String>()) }
+
+    // Which image a delete is waiting on, so the confirmation names it and the
+    // row's own selection is not disturbed until the user commits.
+    var imagePendingDelete by remember { mutableStateOf<String?>(null) }
     var isAppending by remember { mutableStateOf(false) }
     var partitionSearchQuery by remember { mutableStateOf("") }
 
@@ -349,10 +353,15 @@ fun FlashTab(
                                                 color = if (isSelected) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurface
                                             )
                                         }
+                                        // An image is frequently the ONLY copy of
+                                        // that partition, and it cannot be
+                                        // re-derived — nothing here quarantines it
+                                        // (invariant 24), so the confirmation IS
+                                        // the safety net. It also sat within a
+                                        // finger's width of the row's own select
+                                        // button, one tap from the wrong target.
                                         IconButton(onClick = {
-                                            viewModel.deleteLivePartitionImage(img)
-                                            backedUpImages = backedUpImages.filter { it != img }
-                                            if (selectedPartition == img) selectedPartition = ""
+                                            imagePendingDelete = img
                                         }) { Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error) }
                                     }
                                 }
@@ -444,6 +453,40 @@ fun FlashTab(
                 TextButton(onClick = { showRestoreDialog = false }) { Text("Cancel", style = MaterialTheme.typography.titleMedium) }
             }
         )
+
+    imagePendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { imagePendingDelete = null },
+            title = { Text("Delete this image?", style = MaterialTheme.typography.titleMedium) },
+            text = {
+                Text(
+                    "The image for $target is the only copy of that partition. It cannot " +
+                        "be re-created without re-flashing the ROM, and it is not " +
+                        "recoverable once deleted."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteLivePartitionImage(target)
+                    backedUpImages = backedUpImages.filter { it != target }
+                    if (selectedPartition == target) selectedPartition = ""
+                    imagePendingDelete = null
+                }) {
+                    Text(
+                        "Delete for good",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { imagePendingDelete = null }) {
+                    Text("Cancel", style = MaterialTheme.typography.titleMedium)
+                }
+            }
+        )
+    }
+
     }
 
     AnimatedContent(

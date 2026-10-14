@@ -1,12 +1,18 @@
 use std::ffi::OsStr;
 use std::io;
+use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const ZAPDOS: &str = "/data/adb/DroidVault/zapdos";
 pub const TEMP_DIR: &str = "/data/local/tmp/droidvault_apps";
 pub const TARGETS: &str = "/data/local/tmp/droidvault_targets.txt";
 pub const CANCEL_FLAG: &str = "/data/local/tmp/droidvault_cancel";
 pub const BUNDLE_JOURNAL: &str = "/data/adb/DroidVault/bund.pids";
+/// In-flight restore placements (see `restore`). One line per app whose data
+/// directory this process may have replaced: which tree was moved aside, and
+/// which ownership fix is still owed. Cleared by the pass that applies it.
+pub const RESTORE_JOURNAL: &str = "/data/adb/DroidVault/restore-journal.txt";
 
 pub fn register_child(pid: u32, partial_output: Option<&str>) {
     use std::io::Write;
@@ -108,5 +114,37 @@ pub fn valid_package(package: &str) -> bool {
 }
 
 pub fn cancelled() -> bool {
-    std::path::Path::new(CANCEL_FLAG).exists() || !status("pidof", ["com.phoenix.droidvault"])
+    Path::new(CANCEL_FLAG).exists() || !status("pidof", ["com.phoenix.droidvault"])
+}
+
+/// How many [`checkpoint`] calls may pass before the process question is asked
+/// again.
+///
+/// `cancelled()` spawns `pidof` — measured at ~15 ms on the reference device —
+/// so asking it once PER FILE turns a walk over a few hundred entries into a few
+/// hundred process spawns. That is what made a "quick" vault check of six files
+/// take 120 ms, with over 100 ms of it in `pidof`; a real vault makes it seconds
+/// of pure overhead. The flag file is still consulted on every call, so an
+/// interactive cancel is immediate; only "the owning app is gone" is sampled.
+const CANCEL_EVERY: u32 = 128;
+
+static CHECKPOINTS: AtomicU32 = AtomicU32::new(0);
+
+/// Cancellation check for a tight loop: cheap on every call, thorough
+/// occasionally.
+///
+/// The first call always asks the process question, so a loop that runs a
+/// handful of times (the common case for a small vault) behaves exactly like
+/// `cancelled()`.
+pub fn checkpoint() -> bool {
+    if Path::new(CANCEL_FLAG).exists() {
+        return true;
+    }
+    if CHECKPOINTS
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(CANCEL_EVERY)
+    {
+        return !status("pidof", ["com.phoenix.droidvault"]);
+    }
+    false
 }

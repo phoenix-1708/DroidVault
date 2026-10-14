@@ -252,12 +252,25 @@ fun RuleEditorSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(6.dp))
-                FlowChipGroup(
-                    items = labels,
-                    selected = { it.first == labelId },
-                    label = { it.second },
-                    onToggle = { labelId = it.first }
-                )
+                // A rule is meaningless without a label, and `valid` requires one —
+                // so with no labels defined this row used to render as the word
+                // "Label" above nothing, with "Add rule" dead below it and no
+                // reason anywhere (seen on device: App Labels = 0). A button that
+                // is disabled must say what would enable it.
+                if (labels.isEmpty()) {
+                    Text(
+                        "No labels yet. Create one under Automation → App Labels first.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    FlowChipGroup(
+                        items = labels,
+                        selected = { it.first == labelId },
+                        label = { it.second },
+                        onToggle = { labelId = it.first }
+                    )
+                }
             }
             Column {
                 Text(

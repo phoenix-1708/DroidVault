@@ -405,17 +405,72 @@ object AutomationRunner {
             // CONCLUSIVE corrupt verdict blocks — an empty vault or a verify
             // that never started reports "unknown" and must not make Restore
             // permanently dead.
-            if (config.operation == ConfigOperation.RESTORE && engineApps.isNotEmpty()) {
+            //
+            // The dashboard and Manage-screen checks both pass deviceData = true
+            // so one check covers apps AND device data (§2.44's defect fixed on
+            // the display side). The restore gate that confirms those same bytes
+            // before restoring them must use the same scope: an app-only verdict
+            // never read Messages.shift / CallLogs.shift / Folders.shift, so an
+            // app-only restore plan that does not touch device data still gates
+            // apps correctly, but anything that restores device data (or a mixed
+            // run) must see the device verdict too.
+            //
+            // The gate covers whichever halves the plan actually restores, and a
+            // DEVICE-ONLY run is gated too: this used to sit behind
+            // `engineApps.isNotEmpty()`, so a config that restored only messages
+            // and calls was never verified at all — and the device verdict it did
+            // fetch for mixed runs was never consulted, so a damaged
+            // `Messages.shift` was restored headlessly by a scheduled run with
+            // nobody watching. Same defect as §2.44, one path further out.
+            if (config.operation == ConfigOperation.RESTORE) {
                 val restoring = engineApps.map { it.packageName }.toSet()
-                val report = MigratorManager.verifyBackups(
-                    context, resolveSavedPath(context), deviceData = false
-                )
-                val blocked = com.phoenix.droidvault.models.restoreBlockReason(report, restoring)
-                if (blocked != null) {
-                    execution.result = ResultState.FAILED
-                    execution.errorSummary = blocked
-                    finishExecution(context, execution)
-                    return execution
+                val restoringDevice = config.deviceData
+                if (restoring.isNotEmpty() || restoringDevice.isNotEmpty()) {
+                    // Only the halves in the plan: verifying app archives a restore
+                    // will not touch is a full pass over the vault to answer a
+                    // question nobody asked, and a device archive outside the plan
+                    // must not block the apps that are inside it.
+                    val appsHalf = if (restoring.isNotEmpty()) {
+                        MigratorManager.verifyBackups(
+                            context, resolveSavedPath(context), deviceData = false
+                        )
+                    } else {
+                        null
+                    }
+                    val deviceHalf = if (restoringDevice.isNotEmpty()) {
+                        MigratorManager.verifyBackups(
+                            context, resolveSavedPath(context), deviceData = true
+                        )
+                    } else {
+                        null
+                    }
+                    // One verdict from both halves, by the same tested merge the
+                    // manual check uses — so the device rows reach the device gate
+                    // instead of living in a second report nobody reads.
+                    val report = when {
+                        appsHalf != null && deviceHalf != null -> appsHalf.mergedWith(deviceHalf)
+                        appsHalf != null -> appsHalf
+                        else -> deviceHalf
+                    }
+                    val blocked = report?.let {
+                        com.phoenix.droidvault.models.restoreBlockReason(it, restoring)
+                            ?: com.phoenix.droidvault.models.restoreBlockReasonDevice(
+                                it, restoringDevice
+                            )
+                    }
+                    if (blocked != null) {
+                        // The history row carries this for the user; the log carries
+                        // it for whoever has to explain a run that did nothing at
+                        // 3 a.m. A scheduled restore that stops itself is the one
+                        // nobody was watching.
+                        DroidVaultLogger.w(
+                            "Verify", "Scheduled restore refused: $blocked"
+                        )
+                        execution.result = ResultState.FAILED
+                        execution.errorSummary = blocked
+                        finishExecution(context, execution)
+                        return execution
+                    }
                 }
             }
             if (engineApps.isEmpty()) {

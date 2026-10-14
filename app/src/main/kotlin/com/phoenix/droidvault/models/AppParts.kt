@@ -277,3 +277,29 @@ object ChangeDetection {
         return total
     }
 }
+
+/**
+ * Would the Migrate list draw this row at all?
+ *
+ * The single answer to "does this filter include this app", so the screen and the
+ * RUN cannot disagree about what a tick means. They did: the screen showed a
+ * launchable system app whenever "Partial system apps" was on, while
+ * `runnableSelectedApps` honoured "System Apps" alone — so ticking Chrome drew a
+ * checked, highlighted row while the count stayed at 0 and the run button stayed
+ * dead (reported on device).
+ *
+ * A filter exists to help you FIND things. Once a row is on screen and ticked, it
+ * is in the run; a filter that silently un-selects what the user just selected is
+ * not a filter, it is a trap.
+ *
+ * Debloat's restore half shows everything (`actionFilterState == 2`), because
+ * there the question is what can be put back, not what is installed.
+ */
+fun isShownInMigrator(app: AppInfo, state: AppState): Boolean {
+    if (state.actionFilterState == 2) return true
+    return if (app.isSystem) {
+        state.showSystemApps || (state.showPartialSystemApps && app.isLaunchable)
+    } else {
+        state.showUserApps
+    }
+}

@@ -31,9 +31,45 @@ object RunCoordinator {
 
     private val mutex = Mutex()
     private val _ownerState = MutableStateFlow<String?>(null)
+    private val _vaultEpoch = MutableStateFlow(0L)
 
     /** Observable process-wide operation owner for app-shell status and availability UI. */
     val ownerState: StateFlow<String?> = _ownerState.asStateFlow()
+
+    /**
+     * Incremented when the gate is released: a run that may have written to the
+     * vault has just finished.
+     *
+     * Everything that changes vault state holds this gate — that is the point of
+     * it — so this single signal covers app backups, device-data runs, deletes,
+     * folders, transfers and imports without every writer having to remember to
+     * announce itself. A verdict about the vault (the dashboard's health line,
+     * and the pre-restore gate that reads the same report) describes the vault as
+     * it was when it was taken and must not outlive a run that changed it: a
+     * stale "all readable" is the same class of lie as a green tick nothing
+     * earned, and a stale damaged verdict refuses a restore that is now fine.
+     *
+     * Conservative on purpose — a run that failed or wrote nothing also bumps it.
+     * The alternative is guessing whether a run wrote, and guessing wrong is the
+     * failure mode this exists to prevent.
+     */
+    val vaultEpoch: StateFlow<Long> = _vaultEpoch.asStateFlow()
+
+    private val _lastWriter = MutableStateFlow<String?>(null)
+
+    /**
+     * The label of the last run to release the gate; null when none has in this
+     * process.
+     *
+     * The epoch says THAT something was written; this says WHAT kind of thing —
+     * "an app backup" rather than "a run" — which is the difference between a
+     * finding that may already be repaired and a wall of silence. Label only: it
+     * is the same string the gate was taken with (`manual:BACKUP_APPS`,
+     * `device-data`, `transfer`, `automation:<id>`), never a package or a path, so
+     * nothing about the user's data travels with it. Null after a restart, because
+     * a process that was not running cannot know what ran while it was not.
+     */
+    val lastWriter: StateFlow<String?> = _lastWriter.asStateFlow()
 
     /** Current holder label, for messages/diagnostics. Null when idle. */
     @Volatile
@@ -52,6 +88,8 @@ object RunCoordinator {
         } finally {
             currentOwner = null
             _ownerState.value = null
+            _vaultEpoch.value += 1
+            _lastWriter.value = owner
             DroidVaultLogger.v("Gate", "released by $owner")
         }
     }
@@ -86,6 +124,8 @@ object RunCoordinator {
         val was = currentOwner
         currentOwner = null
         _ownerState.value = null
+        _vaultEpoch.value += 1
+        if (was != null) _lastWriter.value = was
         try {
             mutex.unlock()
         } catch (_: Exception) {

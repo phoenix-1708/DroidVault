@@ -1,8 +1,10 @@
 package com.phoenix.droidvault
+import com.phoenix.droidvault.utils.DroidVaultLogger
 import com.phoenix.droidvault.utils.TransferBus
 import com.phoenix.droidvault.utils.TransferOp
 import com.phoenix.droidvault.utils.TransferService
 import com.phoenix.droidvault.utils.VaultTransferManager
+import com.phoenix.droidvault.utils.VaultVerdictStore
 import com.phoenix.droidvault.models.TransferProgress
 import com.phoenix.droidvault.models.VaultTransfer
 import android.widget.Toast
@@ -32,12 +34,15 @@ import androidx.lifecycle.viewModelScope
 import com.phoenix.droidvault.models.AppInfo
 import com.phoenix.droidvault.models.AppInstallInfo
 import com.phoenix.droidvault.models.AppState
+import com.phoenix.droidvault.models.RootState
+import com.phoenix.droidvault.models.classifyRoot
 import com.phoenix.droidvault.models.AppParts
 import com.phoenix.droidvault.models.ChangeDetection
 import com.phoenix.droidvault.models.FlashAction
 import com.phoenix.droidvault.models.HomeShortcut
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.models.Trash
+import com.phoenix.droidvault.models.VaultVerdict
 import com.phoenix.droidvault.models.VerificationReport
 import com.phoenix.droidvault.models.isVaultSourced
 import com.phoenix.droidvault.models.verifyReportAllowsRestore
@@ -51,6 +56,7 @@ import com.phoenix.droidvault.utils.DeviceManager
 import com.phoenix.droidvault.utils.FlashManager
 import com.phoenix.droidvault.utils.Formatters
 import com.phoenix.droidvault.utils.MigratorManager
+import com.phoenix.droidvault.utils.RunCoordinator
 import com.phoenix.droidvault.utils.ProgressTracker
 import com.phoenix.droidvault.utils.SettingsManager
 import com.phoenix.droidvault.utils.ShellQuote
@@ -84,6 +90,30 @@ private const val KEY_HOME_SHORTCUTS = "home_shortcut_ids"
 
 /** Tab index of the Home dashboard — the app always opens here. */
 const val TAB_HOME = 0
+
+/**
+ * Guards the one process-wide resource that two independent startup paths both
+ * reach for: the cached root shell. `LegacyMigration.complete` runs from
+ * `Application.onCreate` and the ViewModel's own probe runs from `init`, and
+ * neither knows about the other.
+ *
+ * FILE-level on purpose, and that is load-bearing. As a member it was declared
+ * far below `init`, and Kotlin initialises properties in declaration order — so
+ * `init { checkRootAccess() }`, which launches on IO, read the field before the
+ * constructor had assigned it. First as `NullPointerException: Null reference
+ * used for synchronization (monitor-enter)`, then after switching to `by lazy`:
+ * `Attempt to invoke virtual method 'Object lh1.getValue()' on a null object
+ * reference`. `by lazy` only defers the VALUE; the delegate field itself is still
+ * assigned in declaration order, so the coroutine still beat it. Both crashes
+ * were on the release build on the POCO F6.
+ *
+ * At file scope the holder is created when the class is loaded, which happens
+ * before any instance exists, so no constructor-order race is possible.
+ */
+private val shellTeardownLock = Any()
+
+/** How many callers currently need the shell to survive a teardown. */
+private val shellUsers = java.util.concurrent.atomic.AtomicInteger(0)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -856,12 +886,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private var lastNotificationUpdateTime = 0L
 
+    /**
+     * Guards the one process-wide resource that two independent startup paths
+     * both reach for: the cached root shell. `LegacyMigration.complete` runs from
+     * `Application.onCreate` and the ViewModel's own probe runs from `init`, and
+     * neither knows about the other.
+     */
     fun checkRootAccess(onDone: ((Boolean) -> Unit)? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             _uiState.value = _uiState.value.copy(isFetchingApps = true)
-            Shell.getCachedShell()?.close()
+            // Drop the cached shell only when nothing else is using it. This used
+            // to close unconditionally, and on a fresh install that raced the
+            // one-time migration: `DroidVaultApp.onCreate` starts
+            // `LegacyMigration.complete` on IO, which issues a root command
+            // within milliseconds, and this closed the process-wide shell out
+            // from under it — so the migration's verdict, including whether its
+            // one-time DONE marker gets written, came from a destroyed shell.
+            // Whichever got there first wins; the loser re-reads a fresh one.
+            synchronized(shellTeardownLock) {
+                val inUse = shellUsers.getAndIncrement()
+                if (inUse == 0) Shell.getCachedShell()?.close()
+            }
             val isRooted = Shell.getShell().isRoot
-            _uiState.value = _uiState.value.copy(hasRoot = isRooted, isFetchingApps = false)
+            // Probed through the UNROOTED shell deliberately: asking `command -v
+            // su` as root would succeed on a device with no root manager at all,
+            // because root's own PATH is not the app's.
+            val hasSu = try {
+                Shell.cmd("command -v su").exec().out.any { it.isNotBlank() }
+            } catch (_: Throwable) {
+                false
+            }
+            shellUsers.decrementAndGet()
+            val rootState = classifyRoot(hasSu, isRooted)
+            // The probe used to record NOTHING, so "why does the app think it has
+            // no root" was unanswerable from a field report — and this gate is a
+            // decision taken silently, which the conventions forbid.
+            DroidVaultLogger.i(
+                "Root",
+                "probe: su binary=$hasSu shellIsRoot=$isRooted -> $rootState"
+            )
+            if (rootState == RootState.NotGranted) {
+                DroidVaultLogger.w(
+                    "Root",
+                    "a root manager is present but did not grant Droid Vault; " +
+                        "the screen must offer the manual route rather than a " +
+                        "button that silently does nothing"
+                )
+            }
+            _uiState.value = _uiState.value.copy(
+                hasRoot = isRooted,
+                rootState = rootState,
+                isFetchingApps = false
+            )
 
             if (isRooted) {
                 val whitelistJob = async {
@@ -1080,6 +1156,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun flashWizardStepBack() {
         val currentStep = _uiState.value.flashWizardStep
         if (currentStep > 1) {
+            // Step 4 is the only step that has ARMED something on disk. Backing
+            // out of it must disarm it: the script can carry `format data`,
+            // `wipe data`, `install` and `reboot`, it survives leaving the tab
+            // and process death, and it fires on the NEXT recovery boot for any
+            // reason at all — with nothing on screen saying it was armed.
+            if (currentStep == 4) disarmRecoveryScript()
             _uiState.value = _uiState.value.copy(flashWizardStep = currentStep - 1)
         } else {
             closeFlashWizard()
@@ -1087,7 +1169,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun closeFlashWizard() {
+        if (_uiState.value.flashWizardStep > 0) disarmRecoveryScript()
         _uiState.value = _uiState.value.copy(flashWizardStep = 0)
+    }
+
+    /**
+     * Remove a recovery script this app wrote.
+     *
+     * Best effort and off the caller's thread: the wizard must close whether or
+     * not the engine answers, because a failure here is not worth trapping the
+     * user inside a destructive screen. It is logged when it fails so a field
+     * report can say the script was still armed.
+     */
+    fun disarmRecoveryScript() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                Shell.cmd("sh /data/adb/DroidVault/DroidVault.sh --clear-ors").exec()
+            } catch (t: Throwable) {
+                com.phoenix.droidvault.utils.DroidVaultLogger.w(
+                    "Flash", "could not clear the recovery script: ${t.message}"
+                )
+            }
+        }
     }
 
     fun analyzeApps(uris: List<Uri>, showInstaller: Boolean = false, isIntent: Boolean = false) {
@@ -1759,6 +1862,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         customPath: String? = null,
         onComplete: (String) -> Unit
     ) {
+        // A partition image drives the SAME `droidvault-engine` binary as every
+        // backup, and it was the one engine-driving operation that took NO run
+        // gate. So a `dd` could run beside a backup or a debloat — and any of
+        // them hitting its watchdog would `pkill -f droidvault-engine` straight
+        // through the middle of it. Two engines, one name, one kill.
+        //
+        // §2.57 removed the clean-finish kill; this removes the overlap that
+        // made it reachable at all.
+        val owner = "flash:${action.removePrefix("--")}"
+        if (!RunCoordinator.tryAcquire(owner)) {
+            val holder = RunCoordinator.currentOwner ?: "another operation"
+            DroidVaultLogger.w("Gate", "$owner refused: gate held by $holder")
+            onComplete("$holder is still running. Try again when it finishes.")
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             // Honest result (audit A-11): the engine's success token gates the
             // message — a failed partition flash must never read "success".
@@ -1773,6 +1891,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 action == "--live-backup" -> "Backup failed for $partition. Check the log and try again."
                 else -> "Flash failed for $partition. Nothing was reported as written."
             }
+            RunCoordinator.release()
             withContext(Dispatchers.Main) { onComplete(msg) }
         }
     }
@@ -1838,6 +1957,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             _savedPath.value = destination
             liveBasePath = destination
+            // The verdict belongs to the folder it was taken in. Reloading here
+            // cannot carry the old folder's report over: `VaultVerdict.forVault`
+            // path-matches, so a verdict about the vault just left behind reads
+            // back as null, which is the honest "not checked yet".
+            reloadVerdict()
             // Auto-import: a folder the user just chose may hold a previous
             // device's automation-state.json — pick it up immediately so the
             // app is fully restored without hunting through menus.
@@ -1882,6 +2006,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (detected.isNotEmpty()) {
                     _savedPath.value = detected
                     liveBasePath = detected
+                    // Same rule as the move path: a verdict describes ONE folder's
+                    // archives, so pointing the app at another one must re-read it
+                    // rather than keep vouching for (or refusing) files it never
+                    // read.
+                    reloadVerdict()
                     getApplication<Application>().safeToast(
                         "Auto-detected folder at: $detected",
                         Toast.LENGTH_SHORT
@@ -1980,6 +2109,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         folderPaths: List<String> = emptyList()
     ) {
         val title = if (isBackup) "Backing up Device Data" else "Restoring Device Data"
+
+        // A device restore reads an archive back into the provider, which holds
+        // the only copy of SMS, calls and contacts on the device. If the check
+        // already found that archive unreadable or altered, refuse NOW, naming the
+        // item — restoring it would write unreadable data and report success for
+        // work that did not happen. Only a conclusive finding blocks.
+        //
+        // This is the plan the run is about to execute, read from the same
+        // arguments the run is about to use. A selection cached anywhere else
+        // could disagree with what actually runs, and the gate would then be
+        // guarding a different restore than the one that starts.
+        if (!isBackup) {
+            val wanted = buildSet {
+                if (doSms) add(com.phoenix.droidvault.models.DeviceDataItem.MESSAGES)
+                if (doCall) add(com.phoenix.droidvault.models.DeviceDataItem.CALLS)
+                if (doContacts) add(com.phoenix.droidvault.models.DeviceDataItem.CONTACTS)
+                if (doWifi) add(com.phoenix.droidvault.models.DeviceDataItem.WIFI)
+                if (doWallpaper) add(com.phoenix.droidvault.models.DeviceDataItem.WALLPAPER)
+                if (doBluetooth) add(com.phoenix.droidvault.models.DeviceDataItem.BLUETOOTH)
+                if (doFolders) add(com.phoenix.droidvault.models.DeviceDataItem.FOLDERS)
+            }
+            val blocked = restoreBlockedByDevice(_verification.value, wanted)
+            if (blocked != null) {
+                // Written down as well as shown. The refusal is the whole point of
+                // the gate and a toast is gone in two seconds, so without this the
+                // diagnostics log holds no evidence that a restore was ever
+                // blocked — which is exactly the question a field report asks
+                // ("I restored and nothing came back"). The reason names the
+                // archive, never its contents.
+                DroidVaultLogger.w("Verify", "Device restore refused: $blocked")
+                _uiState.value = _uiState.value.copy(
+                    isRunning = false,
+                    currentAction = "Cannot restore",
+                    currentStep = blocked,
+                    progress = 0
+                )
+                context.safeToast(blocked)
+                return
+            }
+        }
+
         _uiState.value = _uiState.value.copy(
             isRunning = true,
             currentAction = title,
@@ -2300,26 +2470,53 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         when (mode) {
             MigratorMode.DEBLOAT -> {
-                if (newState == 2 && _appList.value.none { !it.isInstalled }) {
+                // Switching to Restore has to REPLACE the list, not extend it.
+                // This fetched "Uninstalled" — the package manager's apps with
+                // FLAG_INSTALLED cleared — and appended the result to the installed
+                // list still on screen. That source cannot list an app debloat
+                // removed outright, so the append added nothing, the stale
+                // installed list stayed, and the screen's `!isInstalled` filter hid
+                // every row of it: an empty Restore list with a full debloat list
+                // one tap behind it. The vault, not the package manager, decides
+                // what can be restored.
+                if (newState == 2) {
                     _uiState.value = _uiState.value.copy(isFetchingApps = true)
                     viewModelScope.launch {
-                        val uninstalled = MigratorManager.fetchAppsList(
+                        MigratorManager.clearCache()
+                        val backed = MigratorManager.fetchAppsList(
                             getApplication(),
                             _savedPath.value,
-                            "Uninstalled",
-                            true,
+                            "AllBackups",
+                            false,
                             _appList.value,
                             isManage = false,
                             includeOverhead = false
                         )
-                        _appList.value = uninstalled
+                        _appList.value = backed
                         _uiState.value = _uiState.value.copy(
                             actionFilterState = newState,
                             isFetchingApps = false
                         )
                     }
                 } else {
-                    _uiState.value = _uiState.value.copy(actionFilterState = newState)
+                    _uiState.value = _uiState.value.copy(
+                        actionFilterState = newState,
+                        isFetchingApps = true
+                    )
+                    viewModelScope.launch {
+                        MigratorManager.clearCache()
+                        val installed = MigratorManager.fetchAppsList(
+                            getApplication(),
+                            _savedPath.value,
+                            "AllInstalled",
+                            false,
+                            _appList.value,
+                            isManage = false,
+                            includeOverhead = false
+                        )
+                        _appList.value = installed
+                        _uiState.value = _uiState.value.copy(isFetchingApps = false)
+                    }
                 }
             }
 
@@ -2371,7 +2568,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             systemAppsFetched = false,
             actionFilterState = if (mode == MigratorMode.BACKUP_APPS || mode == MigratorMode.RESTORE_APPS || mode == MigratorMode.MANAGE) 0 else 1,
             globalComponents = setOf(1, 2, 3, 4, 5),
-            keepDebloatData = false
+            keepDebloatData = true,
+            pendingDebloatConfirm = false
         )
 
         when (mode) {
@@ -2639,13 +2837,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * state and its "N Selected" label both used the raw isSelected count while
      * the run applied this filter, so a ticked system app with the system-app
      * filter off produced a live button that did nothing.
+     *
+     * The system-app test is deliberately the SAME one the screen uses to decide
+     * whether to draw the row at all — `showSystemApps`, or
+     * `showPartialSystemApps` for a launchable one. It used to be
+     * `showSystemApps` alone, which made the two disagree: turn on "Partial
+     * system apps", tick Chrome, and the row drew ticked and highlighted while
+     * the count stayed at 0 and the button stayed dead. Reported on device.
+     *
+     * **A runnable set that is stricter than the set the user can see and tick
+     * is a lie told by a checkbox.** A filter is for finding things; it must not
+     * silently un-select something already selected. Whatever the screen shows,
+     * ticking means it is in the run.
      */
     private fun runnableSelectedApps(state: AppState, apps: List<AppInfo> = _appList.value) =
-        apps.filter {
-            it.isSelected && (it.isSystem && state.showSystemApps ||
-                !it.isSystem && state.showUserApps ||
-                state.actionFilterState == 2)
-        }
+        apps.filter { it.isSelected && com.phoenix.droidvault.models.isShownInMigrator(it, state) }
 
     // ---------- Archive verification ----------
 
@@ -2660,12 +2866,64 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _verification = MutableStateFlow<VerificationReport?>(null)
     val verification: StateFlow<VerificationReport?> = _verification.asStateFlow()
 
+    /**
+     * The vault's change counter: bumped each time a run releases the gate.
+     *
+     * Screens that state a verdict about the vault collect this and hand it to
+     * [BackupHealth.from], so a report taken before a run cannot be rendered as
+     * if it described the vault now. Nothing needs to remember to invalidate the
+     * report by hand — every writer already holds the gate, which is the point of
+     * it (`RunCoordinator.vaultEpoch`).
+     */
+    val vaultEpoch: StateFlow<Long> = com.phoenix.droidvault.utils.RunCoordinator.vaultEpoch
+
+    /**
+     * What kind of run last released the gate, for the health row's footnote.
+     *
+     * "A run has been over the vault since" is weaker than "an app backup has run
+     * since", and the difference decides whether the user re-checks now or assumes
+     * the report is stale in a harmless way. Label only — see `RunCoordinator`.
+     */
+    val lastVaultWriter: StateFlow<String?> = com.phoenix.droidvault.utils.RunCoordinator.lastWriter
+
     private val _isVerifying = MutableStateFlow(false)
     val isVerifying: StateFlow<Boolean> = _isVerifying.asStateFlow()
 
     /** Whether the report dialog is showing. Transient UI, unlike [verification]. */
     private val _verificationDialogVisible = MutableStateFlow(false)
     val verificationDialogVisible: StateFlow<Boolean> = _verificationDialogVisible.asStateFlow()
+
+    /**
+     * Bring back the verdict from the previous launch.
+     *
+     * An `init` block HERE, under the flow it writes, because Kotlin initialises
+     * properties in declaration order: the same restore in the startup block at
+     * the top of the class would run before `_verification` exists and crash
+     * every launch — the trap `notificationManager` documents above.
+     *
+     * Synchronous on purpose. It is one small prefs read, and it has to finish
+     * before anything can write a fresh report: a check started the moment the
+     * app opens must not be overwritten by the loading of the verdict it
+     * replaced.
+     */
+    init {
+        reloadVerdict()
+    }
+
+    /**
+     * Re-read the stored verdict for the vault currently in use.
+     *
+     * Called at startup and from every place the vault folder changes — the two
+     * are one rule, not two: an in-memory report is not path-checked, so a moved
+     * vault would otherwise go on being vouched for by a check of files it never
+     * read. The load itself path-matches (`VaultVerdict.forVault`), so this is
+     * deliberately a LOAD and never a clear: the state a folder has never been
+     * checked in is null, and clearing would say the same thing while also
+     * destroying a record that belongs to the folder it was taken in.
+     */
+    private fun reloadVerdict() {
+        _verification.value = VaultVerdictStore.load(getApplication(), _savedPath.value)
+    }
 
     /**
      * Read every archive in the vault back through the engine.
@@ -3193,6 +3451,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         MigratorManager.clearCache()
         refreshTrash()
         refreshDeviceBackups()
+        // An import writes NEW archives into the vault, so the app list on screen
+        // is stale the moment it finishes — `clearCache()` only drops the cache,
+        // it does not re-read anything, and nothing repopulated it while the
+        // screen stayed bound. Measured on device: an import that restored a
+        // deleted app's four archives left it missing from the Manage list until
+        // the screen was left and re-entered, which reads as "the import did not
+        // work" on the one screen that shows its result. `refreshCurrentList()`
+        // re-reads whatever list the current mode is showing (the same call the
+        // debloat/restore completion makes) and subsumes the clearCache above.
+        refreshCurrentList()
         _pendingConfigs.value = (result as? VaultTransferManager.Result.Imported)?.configsPending
         withContext(Dispatchers.Main) {
             _uiState.update {
@@ -3499,14 +3767,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun verifyVault(deviceData: Boolean = false) {
+    // `deviceData` has NO default on purpose. Both call sites pass `true`; a
+    // default of `false` is how the check silently became app-archives-only on
+    // every entry point (B-01), and a default that narrows a check must not be
+    // one forgotten argument away from coming back (§2.44).
+    fun verifyVault(deviceData: Boolean) {
         if (_isVerifying.value) return
         _isVerifying.value = true
-        _verificationDialogVisible.value = true
-        // The PREVIOUS result is dropped here, and only here. Keeping a stale
-        // "healthy" report would let a later restore through on an archive that
-        // has since been damaged.
-        _verification.value = null
+        // The dialog is NOT opened here. A check does not know which screen asked
+        // for it, and only the Backups tab composes `VerificationDialog` — so the
+        // old line here meant a check started on Home revealed its dialog on
+        // whatever screen the user happened to open next. Found on device
+        // 2026-10-13: tapping Check on Home and then tapping "Back up apps"
+        // produced a "Backup health" dialog over a screen that never asked for
+        // one. The control that starts a check opens its own dialog
+        // (`showVerificationDialog`), which is invariant 21's rule — nothing this
+        // app does may depend on where the user navigates.
+        //
+        // The PREVIOUS result is deliberately LEFT IN PLACE, including while this
+        // check runs. It is the only thing the pre-restore gate has to work from,
+        // and a check that has not finished has measured nothing — so withdrawing
+        // it here unblocked a restore of an archive every screen is still calling
+        // damaged, for as long as the check ran (minutes on a 30 GB vault).
+        // Nothing is shown from it meanwhile: the card reads "Checking backups"
+        // while `isVerifying`, and the Manage banner hides itself for the same
+        // reason, so keeping it is invisible except to the gate that should keep
+        // refusing. A stale HEALTHY report was never the danger the old comment
+        // claimed — a healthy verdict blocks nothing either way; a withdrawn
+        // DAMAGED one is the whole reason this gate exists.
+        //
+        // Taken BEFORE the first byte is read, and stamped onto the finished
+        // report. Reading the counter afterwards would invert the question: a run
+        // that finished mid-verification bumps the epoch, and a stamp taken after
+        // that bump would describe the report as current even though the run wrote
+        // archives it never looked at. Stamping the value from before means a
+        // report that raced a run is treated as out of date — the one direction
+        // that costs nothing but a second check.
+        val epochAtStart = com.phoenix.droidvault.utils.RunCoordinator.vaultEpoch.value
         viewModelScope.launch(Dispatchers.IO) {
             // Check the apps AND the device data in one go.
             //
@@ -3536,15 +3833,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 } catch (e: Exception) {
                     VerificationReport(error = e.message ?: "Verification failed")
                 }
-                report = report.copy(
-                    apps = report.apps + device.apps,
-                    total = report.total + device.total,
-                    okCount = report.okCount + device.okCount,
-                    corruptCount = report.corruptCount + device.corruptCount,
-                    error = report.error.ifBlank { device.error }
-                )
+                // Every count the device run produced travels into the verdict.
+                // The hand-written merge this replaces kept apps/total/ok/
+                // corrupt/error and dropped the rest, so a device archive whose
+                // digest had changed disappeared from the verdict and the card
+                // read "all readable" over it (§2.47).
+                report = report.mergedWith(device)
             }
-            _verification.value = report
+            // The age a finding carries belongs to the FINDING, not to this check:
+            // whatever was on screen before holds the first sighting of every
+            // archive that fails both then and now. Taken before the save, so the
+            // record on disk carries the same ages the screen shows.
+            val prior = _verification.value
+                ?: VaultVerdictStore.load(getApplication(), _savedPath.value)
+            val stamped = report
+                .withFindingAges(prior, System.currentTimeMillis())
+                .copy(takenAtEpoch = epochAtStart)
+            // Written down before anything else can see it, so it outlives this
+            // process — a restart, a low-memory kill, or the user closing the app
+            // between the check and the restore the check was meant to gate. An
+            // inconclusive run does not replace the stored verdict.
+            VaultVerdictStore.saveIfConclusive(getApplication(), _savedPath.value, stamped)
+            // And shown from the same rule: a run that observed nothing is not a
+            // reason to forget a finding. Without this, a cancelled or errored
+            // check emptied the pre-restore gate and a known-damaged archive was
+            // restorable until the next successful look.
+            _verification.value = VaultVerdict.shownAfter(
+                stamped,
+                VaultVerdictStore.load(getApplication(), _savedPath.value)
+            )
             _isVerifying.value = false
         }
     }
@@ -3554,14 +3871,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _verificationDialogVisible.value = false
     }
 
-    /** Forget a result entirely, e.g. before re-running verification. */
-    fun clearVerification() {
-        _verification.value = null
-    }
-
     /** Re-show a result that is already in hand (the inline banner). */
     fun openVerificationDialog() {
         if (_verification.value != null) _verificationDialogVisible.value = true
+    }
+
+    /**
+     * Reveal the result dialog, including while a check is still running.
+     *
+     * For the control that STARTS a check, which is the screen that can render
+     * the dialog at all. [openVerificationDialog] stays for the banner, where a
+     * result already exists and the only question is whether to re-open it.
+     */
+    fun showVerificationDialog() {
+        _verificationDialogVisible.value = true
     }
 
     /**
@@ -3572,24 +3895,101 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * null must not block — otherwise a fresh install could never restore, and
      * an engine problem would masquerade as "your backups are damaged".
      */
-    /** Shared with the scheduler so both paths apply one rule. */
-    private fun restoreBlockedBy(report: VerificationReport?, state: AppState): String? {
+    /**
+     * Shared with the scheduler so both paths apply one rule.
+     *
+     * Takes no `AppState`: the rule reads the selection off `_appList`, which is
+     * the live value the run itself uses. Passing state in as well invited a
+     * second, staler copy of the selection — and the previous signature took one
+     * it never read.
+     */
+    private fun restoreBlockedBy(report: VerificationReport?): String? {
         val selected = _appList.value.filter { it.isSelected }.map { it.packageName }.toSet()
         return com.phoenix.droidvault.models.restoreBlockReason(report, selected)
     }
 
-    fun runDynamicOperation() {
+    /**
+     * Selected packages for the current restore screen.
+     *
+     * Extracted so the app-phase and device-data restore gates both read from
+     * the same selection rather than one reading the list and the other
+     * recomputing it.
+     */
+    fun selectedRestorePackages(): Set<String> {
+        return _appList.value.filter { it.isSelected }.map { it.packageName }.toSet()
+    }
+
+    /**
+     * Refuse a device-data restore when a selected device archive is known to be
+     * unreadable or altered.
+     *
+     * Called from the one place a device restore starts
+     * ([runDeviceDataOperation]), which is where the plan is actually known: the
+     * previous version of this gate read a selection off `AppState` that nothing
+     * ever wrote, so it could not fire — and a restore plan that nothing writes
+     * is not a policy, it is a comment. The rule itself stays in the model
+     * (`restoreBlockReasonDevice`), shared with the scheduler, because a rule
+     * enforced in two places drifts on one of them (invariant 18).
+     *
+     * Only refuses on a CONCLUSIVE result, same as the app-phase gate. An empty
+     * vault, a cancelled run or an engine that would not start all return null,
+     * and null must not block — otherwise a fresh install could never restore
+     * device data, and an engine problem would masquerade as "your backups are
+     * damaged".
+     */
+    private fun restoreBlockedByDevice(
+        report: VerificationReport?,
+        items: Set<com.phoenix.droidvault.models.DeviceDataItem>
+    ): String? = com.phoenix.droidvault.models.restoreBlockReasonDevice(report, items)
+
+    fun runDynamicOperation(confirmedPermanentDebloat: Boolean = false) {
         val state = _uiState.value
         val selectedApps = runnableSelectedApps(state)
         if (selectedApps.isEmpty()) return
+
+        // Debloat with Keep Data OFF is the one action on this screen that Droid Vault
+        // cannot undo BY ITSELF. `tools::remove` runs `cmd package uninstall
+        // <pkg>` with no `--user 0`, which uninstalls for every user and deletes
+        // /data. Before the engine could reinstall from the app's own archive,
+        // this was a silent one-tap permanent uninstall sitting under a button
+        // labelled "Debloat", next to a Restore toggle implying the opposite.
+        //
+        // Confirmed rather than merely defaulted, because the toggle is the only
+        // thing standing between the two, and invariant 24 allows an irreversible
+        // path only where the user was told which one it is.
+        if (state.migratorMode == MigratorMode.DEBLOAT &&
+            state.actionFilterState == 1 &&
+            !state.keepDebloatData &&
+            !confirmedPermanentDebloat
+        ) {
+            _uiState.value = state.copy(pendingDebloatConfirm = true)
+            return
+        }
+        if (state.pendingDebloatConfirm) {
+            _uiState.value = state.copy(pendingDebloatConfirm = false)
+        }
 
         // A restore reads archives back. If we already know an archive is
         // unreadable, refuse NOW with the reason rather than half-restoring an
         // app and leaving it in a state neither the app nor the user expects.
         // Only a conclusive corrupt result blocks; see restoreBlockedBy.
+        //
+        // RESTORE_APPS restores app archives. MANAGE is the delete path and does
+        // not restore, so the pre-restore gate does not apply to it.
+        //
+        // The gate reads the SAME verdict every restore uses, including the
+        // stored verdict carried across restarts. A damaged verdict never clears
+        // itself; an inconclusive one does not block. This is the damaged-backup
+        // gate: a corrupt archive is refused before it can be written into the
+        // provider, not discovered at restore time.
         if (state.migratorMode == MigratorMode.RESTORE_APPS) {
-            val blocked = restoreBlockedBy(_verification.value, state)
+            val blocked = restoreBlockedBy(_verification.value)
             if (blocked != null) {
+                // Same reason as the device gate's line: a refusal that only ever
+                // existed as a toast leaves no trace of the decision that stopped
+                // the run, and "why did Restore do nothing" is otherwise
+                // unanswerable from a log.
+                DroidVaultLogger.w("Verify", "Restore refused: $blocked")
                 _uiState.value = state.copy(
                     isRunning = false,
                     currentAction = "Cannot restore",
@@ -3605,6 +4005,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             MigratorMode.SYSTEMIZE -> if (state.actionFilterState == 2) "De-Systemizing..." else "Systemizing..."
             MigratorMode.MANAGE -> "Deleting..."
             else -> "Backing Up..."
+        }
+
+        // DEBOOT / SYSTEMIZE drive the SAME engine as a backup, so they take the
+        // SAME gate. Without it a debloat of 200 apps could run beside a manual
+        // backup or a scheduled run — two `droidvault-engine` processes on one
+        // box (invariant 6) — and a backup that hit its timeout would `pkill -f
+        // droidvault-engine` straight through the middle of the debloat. The
+        // Migrate twin above refuses here for exactly this reason; this path was
+        // the one that never did.
+        val toolMode = state.migratorMode == MigratorMode.DEBLOAT ||
+            state.migratorMode == MigratorMode.SYSTEMIZE
+        val acquiredHere = if (toolMode) {
+            RunCoordinator.tryAcquire("tools:${state.migratorMode.name}")
+        } else {
+            false
+        }
+        if (toolMode && !acquiredHere) {
+            val holder = RunCoordinator.currentOwner ?: "another operation"
+            DroidVaultLogger.w("Tools", "$initText refused: gate held by $holder")
+            getApplication<Application>().safeToast(
+                "$holder is still running. Try again when it finishes."
+            )
+            return
         }
 
         _uiState.value = state.copy(
@@ -3651,8 +4074,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                     when (state.migratorMode) {
                         MigratorMode.DEBLOAT, MigratorMode.SYSTEMIZE -> {
+                            // Was an unconditional AllInstalled: after a RESTORE
+                            // from this screen that replaced the vault list with the
+                            // installed one, so the apps just restored were gone
+                            // from the list the user was looking at. The right list
+                            // depends on which half of the screen is showing.
                             MigratorManager.clearCache()
-                            fetchAppsList("AllInstalled")
+                            refreshCurrentList()
                         }
 
                         MigratorMode.MANAGE -> {
@@ -3704,6 +4132,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         context = getApplication(),
                         selectedApps = selectedApps,
                         isRestore = state.actionFilterState == 2,
+                        vaultPath = _savedPath.value,
                         keepData = state.keepDebloatData,
                         updateLog = {},
                         updateProgress = updateProgress,
@@ -3713,6 +4142,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 MigratorMode.SYSTEMIZE -> {
                     if (state.actionFilterState == 2) {
+                        // The module folder is keyed on the DISPLAY LABEL, and
+                        // two apps can share one ("Settings", "Clock"). Say so
+                        // rather than silently removing the other app's
+                        // systemized copy: the removal is keyed on the same
+                        // folder the engine writes.
+                        val byLabel = selectedApps.groupBy { ShellQuote.safeLabel(it.label) }
+                            .filterValues { it.size > 1 }
+                        if (byLabel.isNotEmpty()) {
+                            DroidVaultLogger.w(
+                                "Tools",
+                                "de-systemize: labels shared by more than one app: ${byLabel.keys}"
+                            )
+                        }
+                        // OFF the main thread. This is a blocking root `rm -rf`
+                        // per app inside `viewModelScope.launch { }`, which with no
+                        // dispatcher runs on Main — the A-07/A-19 class, for an
+                        // unbounded selection. Its sibling systemize path already
+                        // wraps in withContext(Dispatchers.IO).
+                        withContext(Dispatchers.IO) {
                         selectedApps.forEach { app ->
                             // Stripping to ASCII leaves "" for any label with no
                             // Latin characters (Chinese, Cyrillic, Arabic, emoji-only),
@@ -3723,6 +4171,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             // which never returns empty; use the same one.
                             val safeLabel = ShellQuote.safeLabel(app.label)
                             Shell.cmd("rm -rf -- ${ShellQuote.q("/data/adb/modules/DroidVault/system/product/priv-app/$safeLabel")} ${ShellQuote.q("/data/adb/modules_update/DroidVault/system/product/priv-app/$safeLabel")}").exec()
+                        }
                         }
                         updateProgress("De-Systemizing", "Removed from module folder", 100)
                         onComplete("De-Systemize Complete!", "Reboot required to apply changes.")
@@ -3763,6 +4212,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }
+            // The gate is released HERE and only here, whatever the branch above
+            // did — including a branch that threw. Leaking it would leave the app
+            // refusing every later run for the life of the process.
+            if (acquiredHere) RunCoordinator.release()
         }
     }
 
@@ -3774,7 +4227,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 MigratorMode.BACKUP_APPS -> fetchAppsList("AllInstalled")
                 MigratorMode.RESTORE_APPS -> fetchAppsList("AllBackups")
                 MigratorMode.DEBLOAT -> {
-                    val type = if (state.actionFilterState == 2) "Uninstalled" else "AllInstalled"
+                    // The restore half of this screen used to fetch "Uninstalled" —
+                    // the package manager's apps with FLAG_INSTALLED cleared, which
+                    // is a list the debloat itself shortens. An app removed with Keep
+                    // Data off is gone from the package manager entirely (verified:
+                    // `pm path`, `pm list packages`, `pm list packages -u` and
+                    // `dumpsys package` all return nothing for it), so it could never
+                    // appear in the very list meant to put it back — reported on
+                    // device as an empty Restore list right after debloating.
+                    //
+                    // What can be restored is decided by the VAULT, not by what the
+                    // package manager still knows, so this is the same fetch the
+                    // Migrate restore screen uses. Automation already states the rule
+                    // (AutomationRunner: an installed-list filter "would silently drop
+                    // every uninstalled app").
+                    val type = if (state.actionFilterState == 2) "AllBackups" else "AllInstalled"
                     fetchAppsList(type)
                 }
 
@@ -3789,6 +4256,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleKeepDebloatData() {
         _uiState.update { it.copy(keepDebloatData = !it.keepDebloatData) }
+    }
+
+    fun dismissDebloatConfirm() {
+        _uiState.update { it.copy(pendingDebloatConfirm = false) }
+    }
+
+    fun confirmPermanentDebloat() {
+        _uiState.update { it.copy(pendingDebloatConfirm = false) }
+        runDynamicOperation(confirmedPermanentDebloat = true)
     }
 
     fun setLabelFilter(labelId: String?) {

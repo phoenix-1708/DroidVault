@@ -189,9 +189,30 @@ object VaultTransferManager {
      * `toLongOrNull()` and silently yields 0. That is exactly what happened: the
      * shell returned `3666177<TAB>/storage/...` and the total came out 0, freezing
      * the bar at "0 B so far" while the archive grew past 2 GB.
+     *
+     * ONE parse for every `du` read in this file, because the rule was applied to
+     * this function and missed on the export gate's own read — which then held the
+     * whole gate inert, the same defect one layer up. A second reader of the same
+     * shell output is a second chance to get the parse wrong.
      */
     private fun probeKb(tree: String, vaultPath: String): Long =
-        Shell.cmd("du -sk ${ShellQuote.q("$vaultPath/$tree")} 2>/dev/null").exec()
+        duKb("$vaultPath/$tree")
+
+    /**
+     * KB used by one path, from `du -sk`.
+     *
+     * `du -sk` answers `<kb><TAB><path>` (verified on device: `413008<TAB>
+     * /storage/emulated/0/DroidVault`). `trim()` removes whitespace at the ENDS of
+     * a string and never the one in the middle, so trimming the whole line leaves
+     * `"413008\t/storage/…"` — which is not a number, and `toLongOrNull()` returns
+     * null. Take the first field.
+     *
+     * Returns 0 when the size cannot be read, because every caller treats 0 as
+     * "unknown" and gates itself on `> 0`; a failed probe must not invent a
+     * refusal. See [weightedTotal] for the same rule on the other side.
+     */
+    private fun duKb(path: String): Long =
+        Shell.cmd("du -sk ${ShellQuote.q(path)} 2>/dev/null").exec()
             .out.firstOrNull()?.trim()?.split("\\s+".toRegex())?.firstOrNull()?.toLongOrNull() ?: 0L
 
     /**
@@ -646,9 +667,18 @@ object VaultTransferManager {
             // lands in the export's own folder — so there is no orphan here to
             // reap. The reaping that matters is the in-progress dot-file, which
             // is handled below where the batch folder is created.
-            val vaultKb = Shell
-                .cmd("du -sk ${ShellQuote.q(vaultPath)} 2>/dev/null")
-                .exec().out.firstOrNull()?.trim()?.toLongOrNull() ?: 0L
+            // Read the size with the ONE reader, not a second hand-rolled parse.
+            // `du -sk` prints `<kb><TAB><path>` (verified on device:
+            // `413008\t/storage/emulated/0/DroidVault`), and `trim()` removes the
+            // tabs at the ENDS of the line, never the one inside it — so
+            // `"413008\t/storage/…".toLongOrNull()` is null and this read has
+            // been returning 0 for the whole vault on every export. The gate
+            // below is `vaultKb > 0 && …`, so it never refused anything: the
+            // export packed until the storage filled as root, the engine
+            // discarded the partial, and the app blamed root for what was a
+            // full disk. This is the same parse `probeKb` was written to fix
+            // (§2.31) — the fix was applied to one of the two readers.
+            val vaultKb = duKb(vaultPath)
             // ONE filesystem: the archive is written straight into its export
             // folder and renamed there. It used to be packed into app staging and
             // copied across, which meant two gates and two budgets for one

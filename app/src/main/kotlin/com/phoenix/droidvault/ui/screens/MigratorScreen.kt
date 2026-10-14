@@ -23,6 +23,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.activity.compose.rememberLauncherForActivityResult
 import com.phoenix.droidvault.ui.safeToast
 import com.phoenix.droidvault.models.VaultTransfer
+import com.phoenix.droidvault.models.VerdictStaleness
+import com.phoenix.droidvault.models.staleness
 import android.widget.Toast
 import android.net.Uri
 import java.io.File
@@ -837,9 +839,10 @@ fun MigratorActionScreen(
                 val isDebloatedMode =
                     appState.migratorMode == MigratorMode.DEBLOAT && appState.actionFilterState == 2
 
-                val matchesType = isDebloatedMode || if (app.isSystem) {
-                    appState.showSystemApps || (appState.showPartialSystemApps && app.isLaunchable)
-                } else true
+                // The same predicate `runnableSelectedApps` uses, so a row can
+                // never be drawn that the run would then refuse to process.
+                val matchesType = isDebloatedMode ||
+                    com.phoenix.droidvault.models.isShownInMigrator(app, appState)
 
                 val matchesAction = when (appState.migratorMode) {
                     MigratorMode.SYSTEMIZE -> {
@@ -847,6 +850,24 @@ fun MigratorActionScreen(
                     }
 
                     MigratorMode.DEBLOAT -> {
+                        // Debloat lists what is installed — that is the set you can
+                        // remove. Restore lists what is NOT installed, out of the
+                        // apps the vault holds: the set this screen could actually
+                        // put back.
+                        //
+                        // This is the same split Canta makes (its INSTALLED tab is
+                        // `!isUninstalled`, its UNINSTALLED tab `isUninstalled`),
+                        // and the same `!isInstalled` test this screen always used.
+                        // The test was never the bug — the UNIVERSE was. Canta's
+                        // universe is the package manager, and it can afford that
+                        // because it uninstalls system apps with DELETE_SYSTEM_APP,
+                        // which leaves them known to the package manager and
+                        // restorable with installExistingPackage. Droid Vault's
+                        // debloat with Keep Data off removed the package from the
+                        // package manager outright, so a package-manager universe
+                        // could not contain what it had just removed, and the list
+                        // came up empty (reported on device). The universe is the
+                        // vault now, which is the one that can still name them.
                         if (appState.actionFilterState == 1) app.isInstalled else !app.isInstalled
                     }
 
@@ -899,6 +920,10 @@ fun MigratorActionScreen(
     val trash by viewModel.trash.collectAsStateWithLifecycle()
     val verification by viewModel.verification.collectAsStateWithLifecycle()
     val isVerifying by viewModel.isVerifying.collectAsStateWithLifecycle()
+    // Staleness is read here rather than remembered: the vault's change counter
+    // moves whenever a run releases the gate, and the banner's claim is about the
+    // vault, not about the check.
+    val vaultEpoch by viewModel.vaultEpoch.collectAsStateWithLifecycle()
     val verificationDialogVisible by viewModel.verificationDialogVisible
         .collectAsStateWithLifecycle()
     // The transfer carried a configuration and this phone already has one.
@@ -1046,6 +1071,7 @@ fun MigratorActionScreen(
     if ((report != null || isVerifying) && verificationDialogVisible) {
         VerificationDialog(
             report = report,
+            staleness = report?.staleness(vaultEpoch) ?: VerdictStaleness.CURRENT,
             running = isVerifying,
             onDismiss = { viewModel.dismissVerificationDialog() }
         )
@@ -1320,7 +1346,14 @@ fun MigratorActionScreen(
                         // moment it is least useful.
                         AnimatedFilterChip(
                             selected = isVerifying,
-                            onClick = { viewModel.verifyVault() },
+                            onClick = {
+                                // This screen composes the dialog, so this screen
+                                // opens it. The check itself must not: a check
+                                // started elsewhere popped the dialog here unasked
+                                // (found on device, 2026-10-13).
+                                viewModel.showVerificationDialog()
+                                viewModel.verifyVault(deviceData = true)
+                            },
                             label = if (isVerifying) "Verifying…" else "Verify backups",
                             leadingIcon = Icons.Default.VerifiedUser,
                             showLabel = expandedChipLabel == "Verify backups",
@@ -1605,8 +1638,14 @@ fun MigratorActionScreen(
             appState.migratorMode == MigratorMode.MANAGE
         ) {
             // Re-opening from the banner; it does not discard the result.
-            VerificationBanner(report) {
-                viewModel.clearVerification()
+            //
+            // It used to clear the report and then ask for a dialog that only
+            // opens when a report exists — so the tap deleted the result and
+            // showed nothing, and a damaged verdict stopped gating the restore
+            // it was there to gate. `stale` is passed for the same reason the
+            // dashboard gets the epoch: a banner over a vault that has since
+            // changed cannot keep saying "all readable".
+            VerificationBanner(report, staleness = report.staleness(vaultEpoch)) {
                 viewModel.openVerificationDialog()
             }
         }
@@ -2336,4 +2375,39 @@ fun MigratorActionScreen(
                 }
             }
         }
+
+    // The only Debloat action Droid Vault cannot undo. Kept as a dialog rather
+    // than a second toggle to read, because "Restore Apps" is one tap away on
+    // this same screen and a permanent uninstall must not look like its neighbour.
+    if (appState.pendingDebloatConfirm) {
+        val count = appList.count {
+            it.isSelected && (it.isSystem && appState.showSystemApps || !it.isSystem)
+        }
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissDebloatConfirm() },
+            title = { Text("Uninstall permanently?") },
+            text = {
+                val apps = com.phoenix.droidvault.models.AppParts.count(count, "app")
+                Text(
+                    if (count == 1) {
+                        "This uninstalls the selected app for every user and deletes its data. " +
+                            "It can be put back only from an existing Droid Vault backup."
+                    } else {
+                        "This uninstalls $apps for every user and deletes their data. " +
+                            "They can be put back only from existing Droid Vault backups."
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { viewModel.confirmPermanentDebloat() }) {
+                    Text("Uninstall anyway", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissDebloatConfirm() }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
+}

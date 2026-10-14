@@ -75,6 +75,25 @@ object MigratorManager {
      * the trash was invisible and unrecoverable. The move already needs root,
      * so the index follows the same path rather than fighting the layer.
      */
+    /**
+     * Serialises every read-modify-write of the trash index.
+     *
+     * The index is one file, and all three mutators (`moveToTrash`,
+     * `restoreTrashBatch`, `purgeTrashBatch`) read it, change it and write it
+     * back. Two of them running at once — two taps on two rows in the trash
+     * dialog, or a delete landing while an undo is running — each read a version
+     * the other had not yet written, and one batch was saved to disk with no
+     * manifest entry: invisible, never purged, and unrecoverable.
+     *
+     * `deleteDeviceBackups` fixed this by acquiring the RUN gate. That is the
+     * wrong level: the trash can be touched with no run in flight at all, and
+     * the gate is far coarser than the thing being protected. The lock is here,
+     * next to the index, so the rule travels with the code that breaks it and
+     * covers all three paths at once.
+     */
+    private val trashIndexLock = java.util.concurrent.locks.ReentrantLock()
+
+
     fun loadTrash(context: Context, vaultPath: String): List<Trash.Batch> {
         ShellQuote.requireAbsPath(vaultPath)
         val out = runCatching {
@@ -114,134 +133,149 @@ object MigratorManager {
      * claim as deleted.
      */
     fun moveToTrash(context: Context, vaultPath: String, paths: List<String>, kind: String): Trash.Batch {
-        ShellQuote.requireAbsPath(vaultPath)
-        val now = System.currentTimeMillis()
-        val id = "b$now"
-        val base = "${trashDir(vaultPath)}/$id"
-        val moved = mutableListOf<Trash.Entry>()
-        val failed = mutableListOf<String>()
+        trashIndexLock.lock()
+        try {
+            ShellQuote.requireAbsPath(vaultPath)
+            val now = System.currentTimeMillis()
+            val id = "b$now"
+            val base = "${trashDir(vaultPath)}/$id"
+            val moved = mutableListOf<Trash.Entry>()
+            val failed = mutableListOf<String>()
 
-        for (path in paths) {
-            // Files too, not just app directories: the Device/ archives
-            // (Messages.shift, CallLogs.shift, Folders.shift) are single
-            // files, and a quarantiner that silently skipped them would leave
-            // the only unrecoverable deletion in the app un-quarantined.
-            if (!File(path).exists() && !Shell.cmd("[ -e ${ShellQuote.q(path)} ]").exec().isSuccess) {
-                continue
-            }
-            try {
-                Trash.requireEncodable(path)
-                // Nested under the PARENT's name so two batches-worth of
-                // entries sharing a basename cannot clobber each other —
-                // Apps/User/1DM+ and Device/1DM+ would otherwise land on the
-                // same destination and one would silently overwrite the other.
-                val src = File(path)
-                val dest = "$base/${src.parentFile?.name ?: "_"}/${src.name}"
-                val parent = File(dest).parentFile
-                parent?.mkdirs()
-                // Root `du`, NOT java.io. A walk of the vault from the app
-                // process sees no files at all (scoped storage — the same blind
-                // spot a device audit recorded), so this silently reported every
-                // deleted backup as 0 KB and the trash looked empty of data.
-                // Found on device.
-                // Works for a file as well as a directory.
-                val sizeKb = Shell.cmd("du -sk ${ShellQuote.q(path)} 2>/dev/null").exec().out
-                    .sumOf { it.trim().split("\\s+".toRegex()).firstOrNull()?.toLongOrNull() ?: 0L }
-                val res = Shell.cmd("mv -- ${ShellQuote.q(path)} ${ShellQuote.q(dest)}").exec()
-                if (res.isSuccess) {
-                    moved += Trash.Entry(path, dest, src.parentFile?.name?.let { "$it/${src.name}" } ?: src.name, sizeKb)
-                } else {
+            for (path in paths) {
+                // Files too, not just app directories: the Device/ archives
+                // (Messages.shift, CallLogs.shift, Folders.shift) are single
+                // files, and a quarantiner that silently skipped them would leave
+                // the only unrecoverable deletion in the app un-quarantined.
+                if (!File(path).exists() && !Shell.cmd("[ -e ${ShellQuote.q(path)} ]").exec().isSuccess) {
+                    continue
+                }
+                try {
+                    Trash.requireEncodable(path)
+                    // Nested under the PARENT's name so two batches-worth of
+                    // entries sharing a basename cannot clobber each other —
+                    // Apps/User/1DM+ and Device/1DM+ would otherwise land on the
+                    // same destination and one would silently overwrite the other.
+                    val src = File(path)
+                    val dest = "$base/${src.parentFile?.name ?: "_"}/${src.name}"
+                    val parent = File(dest).parentFile
+                    parent?.mkdirs()
+                    // Root `du`, NOT java.io. A walk of the vault from the app
+                    // process sees no files at all (scoped storage — the same blind
+                    // spot a device audit recorded), so this silently reported every
+                    // deleted backup as 0 KB and the trash looked empty of data.
+                    // Found on device.
+                    // Works for a file as well as a directory.
+                    val sizeKb = Shell.cmd("du -sk ${ShellQuote.q(path)} 2>/dev/null").exec().out
+                        .sumOf { it.trim().split("\\s+".toRegex()).firstOrNull()?.toLongOrNull() ?: 0L }
+                    val res = Shell.cmd("mv -- ${ShellQuote.q(path)} ${ShellQuote.q(dest)}").exec()
+                    if (res.isSuccess) {
+                        moved += Trash.Entry(path, dest, src.parentFile?.name?.let { "$it/${src.name}" } ?: src.name, sizeKb)
+                    } else {
+                        failed += path
+                    }
+                } catch (e: Exception) {
                     failed += path
                 }
-            } catch (e: Exception) {
-                failed += path
             }
-        }
 
-        val batch = Trash.Batch(id, now, moved, kind)
-        if (moved.isNotEmpty()) {
-            val kept = loadTrash(context, vaultPath) + batch
-            // saveTrash returns Boolean precisely so a failed index write can be
-            // detected. It was discarded, so a root revoked mid-operation, ENOSPC,
-            // or an unwritable .trash produced archives sitting under .trash/<id>
-            // with NO index entry — invisible, unrecoverable through the UI, and
-            // never purged, because purge is index-driven. Meanwhile the caller
-            // reported "recoverable for 7 days".
-            val recorded = saveTrash(context, vaultPath, kept)
-            // Also record the batch id so a user can at least find it by hand.
-            if (!recorded) {
-                android.util.Log.e(
+            val batch = Trash.Batch(id, now, moved, kind)
+            if (moved.isNotEmpty()) {
+                val kept = loadTrash(context, vaultPath) + batch
+                // saveTrash returns Boolean precisely so a failed index write can be
+                // detected. It was discarded, so a root revoked mid-operation, ENOSPC,
+                // or an unwritable .trash produced archives sitting under .trash/<id>
+                // with NO index entry — invisible, unrecoverable through the UI, and
+                // never purged, because purge is index-driven. Meanwhile the caller
+                // reported "recoverable for 7 days".
+                val recorded = saveTrash(context, vaultPath, kept)
+                // Also record the batch id so a user can at least find it by hand.
+                if (!recorded) {
+                    android.util.Log.e(
+                        "MigratorManager",
+                        "Trash: index write FAILED for batch $id — $id/moved items are in " +
+                            "$base but have no manifest entry and cannot be restored from the app"
+                    )
+                }
+                Trash.expiredBatchIds(kept, System.currentTimeMillis()).forEach { stale ->
+                    purgeTrashBatch(context, vaultPath, stale)
+                }
+            }
+            if (failed.isNotEmpty()) {
+                android.util.Log.w(
                     "MigratorManager",
-                    "Trash: index write FAILED for batch $id — $id/moved items are in " +
-                        "$base but have no manifest entry and cannot be restored from the app"
+                    "Trash: ${failed.size} item(s) could not be moved and remain on disk: $failed"
                 )
             }
-            Trash.expiredBatchIds(kept, System.currentTimeMillis()).forEach { stale ->
-                purgeTrashBatch(context, vaultPath, stale)
-            }
+            return batch
+        } finally {
+            trashIndexLock.unlock()
         }
-        if (failed.isNotEmpty()) {
-            android.util.Log.w(
-                "MigratorManager",
-                "Trash: ${failed.size} item(s) could not be moved and remain on disk: $failed"
-            )
-        }
-        return batch
     }
 
     /** Put a quarantined batch back where it came from. */
     fun restoreTrashBatch(context: Context, vaultPath: String, batchId: String): Result<Int> {
-        ShellQuote.requireAbsPath(vaultPath)
-        return runCatching {
-            val batches = loadTrash(context, vaultPath)
-            val batch = batches.firstOrNull { it.id == batchId }
-                ?: return@runCatching 0
-            var restored = 0
-            for (e in batch.entries) {
-                File(e.originalPath).parentFile?.mkdirs()
-                val res = Shell.cmd("mv -- ${ShellQuote.q(e.trashPath)} ${ShellQuote.q(e.originalPath)}")
-                    .exec()
-                if (res.isSuccess) restored++
+        trashIndexLock.lock()
+        try {
+            ShellQuote.requireAbsPath(vaultPath)
+            return runCatching {
+                val batches = loadTrash(context, vaultPath)
+                val batch = batches.firstOrNull { it.id == batchId }
+                    ?: return@runCatching 0
+                var restored = 0
+                for (e in batch.entries) {
+                    File(e.originalPath).parentFile?.mkdirs()
+                    val res = Shell.cmd("mv -- ${ShellQuote.q(e.trashPath)} ${ShellQuote.q(e.originalPath)}")
+                        .exec()
+                    if (res.isSuccess) restored++
+                }
+                saveTrash(context, vaultPath, batches.filterNot { it.id == batchId })
+                // Drop the now-empty directory tree. Leaving it behind accumulates
+                // one tree per undo, and the manifest no longer references them, so
+                // nothing would ever reclaim them.
+                //
+                // Two earlier attempts were wrong and the device caught both:
+                //  - `rmdir <batch>` refuses outright when `<batch>/Device/` still
+                //    exists, because rmdir does not recurse.
+                //  - `rmdir -p <batch>` fails for the SAME reason: it removes the
+                //    target first, cannot, and so never walks up. Verified — the
+                //    orphan survived, while `rmdir -p <batch>/Device` run by hand
+                //    removed both.
+                // `-depth` visits children before parents, so every directory that
+                // is now empty goes, and one that is not (a partially-restored
+                // batch) is simply skipped rather than aborting the walk.
+                //
+                // The exit status is deliberately NOT checked: `find -exec rmdir`
+                // is non-zero if any rmdir refused, which is the normal case for a
+                // batch that still holds something. The check that matters is
+                // whether the batch directory is gone.
+                Shell.cmd(
+                    "find ${ShellQuote.q("${trashDir(vaultPath)}/$batchId")} -depth -type d " +
+                        "-exec rmdir -- {} + 2>/dev/null"
+                ).exec()
+                restored
             }
-            saveTrash(context, vaultPath, batches.filterNot { it.id == batchId })
-            // Drop the now-empty directory tree. Leaving it behind accumulates
-            // one tree per undo, and the manifest no longer references them, so
-            // nothing would ever reclaim them.
-            //
-            // Two earlier attempts were wrong and the device caught both:
-            //  - `rmdir <batch>` refuses outright when `<batch>/Device/` still
-            //    exists, because rmdir does not recurse.
-            //  - `rmdir -p <batch>` fails for the SAME reason: it removes the
-            //    target first, cannot, and so never walks up. Verified — the
-            //    orphan survived, while `rmdir -p <batch>/Device` run by hand
-            //    removed both.
-            // `-depth` visits children before parents, so every directory that
-            // is now empty goes, and one that is not (a partially-restored
-            // batch) is simply skipped rather than aborting the walk.
-            //
-            // The exit status is deliberately NOT checked: `find -exec rmdir`
-            // is non-zero if any rmdir refused, which is the normal case for a
-            // batch that still holds something. The check that matters is
-            // whether the batch directory is gone.
-            Shell.cmd(
-                "find ${ShellQuote.q("${trashDir(vaultPath)}/$batchId")} -depth -type d " +
-                    "-exec rmdir -- {} + 2>/dev/null"
-            ).exec()
-            restored
+        } finally {
+            trashIndexLock.unlock()
         }
     }
 
     /** Irreversibly erase one quarantined batch. */
     fun purgeTrashBatch(context: Context, vaultPath: String, batchId: String): Boolean {
-        ShellQuote.requireAbsPath(vaultPath)
-        val batches = loadTrash(context, vaultPath)
-        val batch = batches.firstOrNull { it.id == batchId } ?: return false
-        batch.entries.forEach {
-            Shell.cmd("rm -rf -- ${ShellQuote.q(it.trashPath)}").exec()
+        trashIndexLock.lock()
+        try {
+            ShellQuote.requireAbsPath(vaultPath)
+            val batches = loadTrash(context, vaultPath)
+            val batch = batches.firstOrNull { it.id == batchId } ?: return false
+            batch.entries.forEach {
+                Shell.cmd("rm -rf -- ${ShellQuote.q(it.trashPath)}").exec()
+            }
+            Shell.cmd("rm -rf -- ${ShellQuote.q("${trashDir(vaultPath)}/$batchId")}").exec()
+            saveTrash(context, vaultPath, batches.filterNot { it.id == batchId })
+            return true
+        } finally {
+            trashIndexLock.unlock()
         }
-        Shell.cmd("rm -rf -- ${ShellQuote.q("${trashDir(vaultPath)}/$batchId")}").exec()
-        saveTrash(context, vaultPath, batches.filterNot { it.id == batchId })
-        return true
     }
 
     fun trashHeldKb(context: Context, vaultPath: String): Long =
@@ -410,7 +444,13 @@ object MigratorManager {
                 // list latency on label-keyed vaults). Returned paths are the
                 // Meta.txt files that carry an SSAID line.
                 val ssaidMetaFiles: Set<String> = try {
-                    Shell.cmd("grep -l '^SSAID=' \"${currentPath}\"/Apps/*/*/Meta.txt 2>/dev/null")
+                    // The vault folder is the user's choice, so it is quoted rather
+                    // than hand-wrapped in double quotes: a folder named with a `$
+                    // or a backtick is a command otherwise, and the globs after it
+                    // must stay outside the quotes to expand.
+                    Shell.cmd(
+                        "grep -l '^SSAID=' ${ShellQuote.q("$currentPath/Apps")}/*/*/Meta.txt 2>/dev/null"
+                    )
                         .exec().out.map { it.trim() }.toSet()
                 } catch (_: Exception) {
                     emptySet()
@@ -572,8 +612,13 @@ object MigratorManager {
             "RestoreUser", "RestoreSystem", "AllBackups" -> {
                 val pathType = when (type) { "RestoreUser" -> "User"; "RestoreSystem" -> "System"; else -> "*" }
 
+                // `UserDeSize` joins the list the engine writes: it records
+                // `/data/user_de/0` on its own, alongside `DataSize` for
+                // `/data/data`. The restore space gate reads these per-archive
+                // figures, so a grep that left one out would silently drop a root
+                // the gate is asked about.
                 val command =
-                    "grep -H -e \"^Name=\" -e \"^Package=\" -e \"^Version=\" -e \"^VersionCode=\" -e \"^AppSize=\" -e \"^DataExtSize=\" -e \"^MediaOBBSize=\" -e \"^DataSize=\" -e \"^ExtDataSize=\" -e \"^MediaSize=\" -e \"^ObbSize=\" -e \"^SSAID=\" \"$currentPath\"/Apps/$pathType/*/Meta.txt 2>/dev/null"
+                    "grep -H -e \"^Name=\" -e \"^Package=\" -e \"^Version=\" -e \"^VersionCode=\" -e \"^AppSize=\" -e \"^DataExtSize=\" -e \"^MediaOBBSize=\" -e \"^DataSize=\" -e \"^UserDeSize=\" -e \"^ExtDataSize=\" -e \"^MediaSize=\" -e \"^ObbSize=\" -e \"^SSAID=\" \"$currentPath\"/Apps/$pathType/*/Meta.txt 2>/dev/null"
                 val result = Shell.cmd(command).exec()
                 val iconCacheDir = File(context.cacheDir, "droidvault_icons").apply { mkdirs() }
 
@@ -1138,7 +1183,7 @@ object MigratorManager {
 
                 val scriptFile = File(context.cacheDir, "check_comps.sh")
                 scriptFile.writeText(script)
-                val out = Shell.cmd("sh \"${scriptFile.absolutePath}\"").exec().out
+                val out = Shell.cmd("sh ${ShellQuote.q(scriptFile.absolutePath)}").exec().out
                 scriptFile.delete()
 
                 out.forEach { line ->
@@ -1285,7 +1330,7 @@ object MigratorManager {
                 if (iconScript.isNotEmpty()) {
                     val scriptFile = File(context.cacheDir, "copy_icons.sh")
                     scriptFile.writeText(iconScript.toString())
-                    Shell.cmd("sh \"${scriptFile.absolutePath}\"").exec()
+                    Shell.cmd("sh ${ShellQuote.q(scriptFile.absolutePath)}").exec()
                     scriptFile.delete()
                 }
             }

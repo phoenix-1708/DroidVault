@@ -1,6 +1,6 @@
 package com.phoenix.droidvault.ui.screens
 
-import android.widget.Toast
+import com.phoenix.droidvault.ui.safeToast
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -280,9 +280,7 @@ fun AboutScreen(
                             }
                             context.startActivity(Intent.createChooser(send, "Share Droid Vault via"))
                         }.onFailure {
-                            android.widget.Toast
-                                .makeText(context, "No app available to share", Toast.LENGTH_SHORT)
-                                .show()
+                            context.safeToast("No app available to share")
                         }
                     }
                     AboutActionCard(
@@ -298,9 +296,7 @@ fun AboutScreen(
                             engineCurrent = engineCurrent
                         )
                         scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Droid Vault build info", report))) }
-                        android.widget.Toast
-                            .makeText(context, "Build info copied", Toast.LENGTH_SHORT)
-                            .show()
+                        context.safeToast("Build info copied")
                     }
                 }
             }
@@ -920,7 +916,9 @@ private val APP_PART_FACTS = listOf(
     Fact(
         "App permissions",
         "The app's runtime permission and app-op state, read from appops and " +
-            "dumpsys. Restoring this part is optional and off unless you enable it."
+            "dumpsys. Restoring this part is ON by default — turn it off in " +
+            "Settings if you would rather restore an app with the permissions it " +
+            "has now."
     ),
     Fact(
         "Media & OBB",
@@ -928,8 +926,9 @@ private val APP_PART_FACTS = listOf(
     ),
     Fact(
         "Android ID",
-        "The app-scoped SSAID stored in Meta.txt. Restoring it is optional and off " +
-            "unless you enable it."
+        "The app-scoped SSAID stored in Meta.txt. Restoring it is ON by default — " +
+            "turn it off in Settings if you do not want a restored app to keep the " +
+            "identity it had before."
     )
 )
 
