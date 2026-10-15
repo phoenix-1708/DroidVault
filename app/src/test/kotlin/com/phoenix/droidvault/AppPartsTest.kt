@@ -355,6 +355,42 @@ class AppPartsTest {
     }
 
     @Test
+    fun `the progress row subtitle reads as a count and a part count`() {
+        // Reported off a finished run's screen: the subtitle read "1/1 part}"
+        // and "5/5 parts}". The row was a string template written inline in the
+        // Composable with one `}` too many, and a `}` outside a `${…}` is an
+        // ordinary character — so the compiler agreed, and nothing rendered the
+        // row except a completed run.
+        assertEquals("1/1 part", AppParts.progressMeta(1, 1))
+        assertEquals("5/5 parts", AppParts.progressMeta(5, 5))
+        assertEquals("3/6 parts", AppParts.progressMeta(3, 6))
+        assertEquals("0/5 parts", AppParts.progressMeta(0, 5))
+    }
+
+    @Test
+    fun `the progress row subtitle never carries a stray brace`() {
+        // Asserted separately from the expected strings so a regression names
+        // the defect rather than just failing to match.
+        for (done in 0..6) {
+            for (parts in 1..6) {
+                val meta = AppParts.progressMeta(done, parts)
+                assertFalse(
+                    "a user-facing subtitle must not contain a brace: \"$meta\"",
+                    meta.any { it == '{' || it == '}' }
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `an app with no parts contributes no subtitle`() {
+        // The caller adds a size instead; an empty string would render as a
+        // leading " • " on the joined row.
+        assertEquals("", AppParts.progressMeta(0, 0))
+        assertEquals("", AppParts.progressMeta(3, -1))
+    }
+
+    @Test
     fun `every other count is plural`() {
         // Zero is plural, which is why "No apps" style copy must not route
         // through this helper — it describes absence, not a count.

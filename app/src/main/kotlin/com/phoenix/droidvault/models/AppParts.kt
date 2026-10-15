@@ -186,6 +186,22 @@ object AppParts {
      */
     fun count(count: Int, noun: String, pluralNoun: String = noun + "s"): String =
         "$count ${if (count == 1) noun else pluralNoun}"
+
+    /**
+     * The subtitle under an app's name while a run is in flight or has just
+     * finished: "5/5 parts", "1/1 part".
+     *
+     * This lived inline in the Composable as a string template, where it read
+     * `…"part")}}` — one `}` too many, and it shipped. A `}` outside a `${…}` is
+     * an ordinary character, so the compiler was silent, and the row only ever
+     * renders on a completed run, so no test and no screen a tester visited
+     * showed it. It sat there until someone read a finished run's screen.
+     *
+     * Here it is a value with an exact expected output, so the shape is asserted
+     * rather than eyeballed.
+     */
+    fun progressMeta(doneCount: Int, partCount: Int): String =
+        if (partCount <= 0) "" else "$doneCount/${count(partCount, "part")}"
 }
 // ---------- Incremental backup ----------
 

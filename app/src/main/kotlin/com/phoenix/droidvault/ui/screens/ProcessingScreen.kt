@@ -78,6 +78,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.phoenix.droidvault.models.AppProgress
+import com.phoenix.droidvault.models.AppParts
 import com.phoenix.droidvault.models.LiveOp
 import com.phoenix.droidvault.models.Parts
 import com.phoenix.droidvault.models.PartState
@@ -849,7 +850,8 @@ private fun AppProgressCard(
                     overflow = TextOverflow.Ellipsis,
                 )
                 val meta = buildList {
-                    if (app.parts.isNotEmpty()) add("${app.doneCount}/${com.phoenix.droidvault.models.AppParts.count(app.parts.size, "part")}}")
+                    app.parts.takeIf { it.isNotEmpty() }
+                        ?.let { add(AppParts.progressMeta(app.doneCount, it.size)) }
                     if (app.sizeKb > 0) add(formatKb(app.sizeKb))
                 }
                 if (meta.isNotEmpty()) {
