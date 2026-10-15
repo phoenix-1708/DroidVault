@@ -61,6 +61,19 @@ The tag is the single source of truth for what gets built, so a release cannot
 end up built from a different commit than the tag says. You can also run the
 workflow manually from the Actions tab and give it an existing tag.
 
+**3. Verify the artifact you published, not the one you tested.** The APK built
+on your machine and the APK GitHub Actions builds are not the same bytes — for
+the Rust engine they differ substantially, because Rust binaries are not
+reproducible across toolchains, and the source can be identical. Download the
+file from the release page, install it, and drive it. Until then you have tested
+a build nobody receives (`AUDIT.md` §2.66).
+
+```sh
+gh release download v2.0.0 -R phoenix-1708/DroidVault -p arm64-v8a-release.apk
+adb install -r arm64-v8a-release.apk
+# then exercise the vault — a verification is the heaviest thing there is
+```
+
 ## 3. What gets published
 
 Two APKs, one per architecture, each carrying only its own native engine:
