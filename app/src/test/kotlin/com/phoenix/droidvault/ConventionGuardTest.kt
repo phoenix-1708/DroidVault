@@ -1643,4 +1643,62 @@ class ConventionGuardTest {
                 .containsMatchIn(vm)
         )
     }
+
+    /**
+     * A release-notes file may only name an APK that the workflow actually
+     * publishes.
+     *
+     * 2.0.0's release page told every user to download
+     * `app-arm64-v8a-release.apk`. The asset was `arm64-v8a-release.apk`,
+     * because the workflow's collect step strips the Gradle `app-` prefix when
+     * it copies into `dist/`. So the one instruction every reader acts on named
+     * a file that was not there — and it was published, and it stayed published
+     * until someone read the page back.
+     *
+     * Both halves are read from their own source of truth rather than restated:
+     * the ABIs come from the Gradle splits, the published naming from the
+     * workflow's own rename. Restating either here would let the guard agree with
+     * a document that had already drifted.
+     */
+    @Test
+    fun `release notes only name APKs the release workflow publishes`() {
+        val gradle = read(File(repoRoot, "app/build.gradle.kts"))
+        val workflow = read(File(repoRoot, ".github/workflows/release.yml"))
+
+        val abis = Regex("""include\(([^)]*)\)""")
+            .find(gradle)?.groupValues?.get(1)
+            ?.split(",")
+            ?.map { it.trim().trim('"', '\'') }
+            ?.filter { it.isNotEmpty() }
+            .orEmpty()
+        assertTrue("could not read the ABI splits from build.gradle.kts", abis.isNotEmpty())
+
+        // The name a user downloads is `<abi>-release.apk`: the collect step
+        // copies `app-<abi>-release.apk` to `dist/${abi}-release.apk`.
+        assertTrue(
+            "the workflow's collect step should publish <abi>-release.apk — if this " +
+                "changed, this guard is checking the wrong contract",
+            workflow.contains("out=\"dist/\${abi}-release.apk\"")
+        )
+
+        val notesDir = File(repoRoot, ".github/release-notes")
+        val notes = notesDir.listFiles { f: File -> f.name.endsWith(".md") }.orEmpty()
+        assertTrue("expected at least one release-notes file", notes.isNotEmpty())
+
+        val published = abis.map { "$it-release.apk" }.toSet()
+        for (file in notes) {
+            val named = Regex("""`([A-Za-z0-9_.-]+\.apk)`""")
+                .findAll(read(file))
+                .map { it.groupValues[1] }
+                .toSet()
+            for (name in named) {
+                assertTrue(
+                    "${file.name} names `$name`, which the release does not publish. " +
+                        "The downloadable files are ${published.sorted().joinToString()}. " +
+                        "A reader who follows the page must find the file it names.",
+                    name in published
+                )
+            }
+        }
+    }
 }
