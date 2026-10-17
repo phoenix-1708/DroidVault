@@ -657,7 +657,7 @@ fun SettingsTab(
                                     vaultContents?.health?.get(info.name) ==
                                         com.phoenix.droidvault.utils.AutomationSnapshot.VaultHealth.STALE ->
                                         MaterialTheme.colorScheme.error
-                                    else -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
                                 }
                             )
                         }
@@ -905,10 +905,12 @@ fun SettingsTab(
                 // counts as stale. The summary line is a claim about every grant,
                 // so it may only be made when every one of them was actually read.
                 if (permCheck != null && permCheck!!.let { it.appopUsageStats && it.postNotifications && it.deviceidleWhitelisted && it.engineMatch == true && it.restrictedSettingsAllowed }) {
+                    // A reassuring footnote, not a link. It rendered in the accent
+                    // blue, which read as "tap here" on a row that cannot be tapped.
                     Text(
                         "All standing grants are fresh.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)
                     )
                 }

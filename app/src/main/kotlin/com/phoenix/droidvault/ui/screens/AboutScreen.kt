@@ -316,7 +316,7 @@ fun AboutScreen(
                     Text(
                         "phoenix-1708",
                         style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(

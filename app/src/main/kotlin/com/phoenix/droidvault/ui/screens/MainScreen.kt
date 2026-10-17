@@ -1531,7 +1531,7 @@ fun OnboardingStepContent(
                     Text(
                         "Droid Vault",
                         style = MaterialTheme.typography.headlineLarge,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(Modifier.height(16.dp))
                     Text(
@@ -1608,7 +1608,7 @@ fun OnboardingStepContent(
                     Text(
                         "Droid Vault Directory",
                         style = MaterialTheme.typography.headlineMedium,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Spacer(Modifier.height(16.dp))
                     Text(
@@ -1715,7 +1715,7 @@ fun OnboardingStepContent(
                     Text(
                         "Made by phoenix-1708",
                         style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = MaterialTheme.colorScheme.onSurface,
                         textAlign = TextAlign.Center
                     )
                     Spacer(modifier = Modifier.height(16.dp))
