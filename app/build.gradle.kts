@@ -816,7 +816,9 @@ android {
         // Verified on device: 30 GB split export 30 min -> 3m07s; import
         // ~8 min -> ~2m45s; parts, manifest and Check all verified; archives
         // written by earlier builds still import unchanged.
-        // 3.0.0 (500000) — stable. Manage Backups, diagnostics, the log
+        // 3.0.0 (500000) — WITHDRAWN, superseded by 3.0.1. It shipped a UI in
+// which every container resolved its text colour to the accent blue (§2.90).
+// Manage Backups, diagnostics, the log
         // viewer, and a UI that finally reads as one app.
         // versionCode 500000 — a NEW major-version band, ABOVE every code ever
         // published: 300015 (1.0.0), the 300018/300019 1.x builds, and 400000
@@ -938,8 +940,21 @@ android {
         // the type scale and palette flip, both blocked empty states, all
         // thirteen released touch targets at 1x and 2x, the Home layout at both
         // font scales, and the full tab sweep.
-        versionCode = 500000
-        versionName = "3.0.0"
+        // 3.0.1 (500001) — fixes the 3.0.0 heading colour. Withdrawn and
+        // re-released rather than re-tagged, because anyone who installed the
+        // broken 3.0.0 is already on versionCode 500000 and an upgrade has to be
+        // unambiguous.
+        //  - Headings stopped rendering in the accent blue. Every card, sheet and
+        //    dialog in the app was drawing its title in the link colour instead
+        //    of the reading colour, so "Back up apps", "Backup Configurations"
+        //    and every other navigation title looked like a hyperlink. Fixed in
+        //    the palette, for both dark and light.
+        //  - Nothing else changed. No colour the eye can separate moved: only
+        //    the two roles that were sharing a value with the card tone were
+        //    nudged three units off it, which is what lets each container pick
+        //    the right text colour.
+        versionCode = 500001
+        versionName = "3.0.1"
     }
 
     signingConfigs {
