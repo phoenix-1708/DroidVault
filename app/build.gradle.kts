@@ -940,7 +940,9 @@ android {
         // the type scale and palette flip, both blocked empty states, all
         // thirteen released touch targets at 1x and 2x, the Home layout at both
         // font scales, and the full tab sweep.
-        // 3.0.1 (500001) — fixes the 3.0.0 heading colour. Withdrawn and
+        // 3.0.1 (500001) — fixed the card/heading colour collision. Superseded by
+        // 3.0.2, which takes the accent off six texts that asked for it directly.
+        // Withdrawn and
         // re-released rather than re-tagged, because anyone who installed the
         // broken 3.0.0 is already on versionCode 500000 and an upgrade has to be
         // unambiguous.
@@ -953,8 +955,20 @@ android {
         //    the two roles that were sharing a value with the card tone were
         //    nudged three units off it, which is what lets each container pick
         //    the right text colour.
-        versionCode = 500001
-        versionName = "3.0.1"
+        // 3.0.2 (500002) — takes the accent colour off the six headings,
+        // values and metadata lines that still asked for it explicitly. 3.0.1
+        // fixed the palette collision that made every card's title render in the
+        // link colour; these six were not reachable by that fix because they
+        // named the accent themselves.
+        //  - The onboarding headings, the About heading, the vault file
+        //    size-and-date line and the "All standing grants are fresh."
+        //    footnote now use the reading colour.
+        //  - The accent now means pressable, in flight, or chosen — and nothing
+        //    else. Action labels, live progress, badges and the selected tab
+        //    keep it, because there the colour is information.
+        //  - Nothing else changed.
+        versionCode = 500002
+        versionName = "3.0.2"
     }
 
     signingConfigs {
