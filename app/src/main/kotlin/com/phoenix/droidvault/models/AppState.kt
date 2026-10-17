@@ -3,7 +3,16 @@ package com.phoenix.droidvault.models
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
 
-enum class MigratorMode { MENU, BACKUP_APPS, RESTORE_APPS, MANAGE, DEBLOAT, SYSTEMIZE }
+/**
+ * A sub-screen of the Migrate tab.
+ *
+ * [IMPORT_TRANSFERS] is the only one that lists no apps at all: it lists the
+ * exports this phone holds, one row each, because an export is seventeen files
+ * and a person made one of them.
+ */
+enum class MigratorMode {
+    MENU, BACKUP_APPS, RESTORE_APPS, MANAGE, DEBLOAT, SYSTEMIZE, IMPORT_TRANSFERS
+}
 
 /**
  * True when this mode's app list is sourced from the VAULT rather than from

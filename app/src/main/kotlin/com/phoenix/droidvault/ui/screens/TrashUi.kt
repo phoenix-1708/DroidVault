@@ -93,9 +93,17 @@ fun TrashCard(
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    "${com.phoenix.droidvault.models.AppParts.count(batches.sumOf { it.count }, "deleted backup")}} recoverable",
+                    // A `}` OUTSIDE `${…}` is an ordinary character, so the
+                    // compiler had no opinion and every test that renders this
+                    // card read "1 deleted backup recoverable". Found on device
+                    // 2026-10-15, on the Manage screen — the same defect §2.67
+                    // recorded for the per-run subtitle, in the one place the
+                    // property guard below did not reach.
+                    com.phoenix.droidvault.models.AppParts.count(
+                        batches.sumOf { it.count },
+                        "deleted backup"
+                    ) + " recoverable",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
                 )
                 Text(
                     "${formatMb(heldKb)} held • recoverable for 7 days",
@@ -157,7 +165,6 @@ fun TrashDialog(
                                         // "1 app" rows are indistinguishable.
                                         Trash.entrySummary(batch),
                                         style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold
                                     )
                                     Text(
                                         Trash.batchLabel(batch.count, batch.kind) +

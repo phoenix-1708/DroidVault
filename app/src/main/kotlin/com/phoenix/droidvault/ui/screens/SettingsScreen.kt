@@ -15,6 +15,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -54,8 +55,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -67,6 +70,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -77,6 +81,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.phoenix.droidvault.MainViewModel
 import com.phoenix.droidvault.ui.components.DvIconBadge
+import com.phoenix.droidvault.models.AppParts
+import com.phoenix.droidvault.models.DiagLog
+import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.DvRole
 import com.phoenix.droidvault.ui.theme.DvShapes
 import com.phoenix.droidvault.ui.theme.dvAccent
@@ -91,6 +98,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.core.content.FileProvider
 import com.phoenix.droidvault.utils.DroidVaultLogger
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 @Composable
@@ -106,7 +114,6 @@ private fun ConsentRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Switch(checked = checked, onCheckedChange = { want -> if (want) onEnableRequest() else onDisable() })
@@ -130,11 +137,25 @@ fun SettingsTab(
     val uiState by viewModel.shellUiState.collectAsStateWithLifecycle()
     var permCheck by remember { mutableStateOf<com.phoenix.droidvault.utils.PermissionChecker.CheckState?>(null) }
     var permCheckBusy by remember { mutableStateOf(false) }
+    val permScope = rememberCoroutineScope()
     val refreshPermissionStatus: () -> Unit = {
         permCheckBusy = true
         viewModel.checkRootAccess {
-            permCheck = com.phoenix.droidvault.utils.PermissionChecker.check(context)
-            permCheckBusy = false
+            // `PermissionChecker.check` blocks on a root-shell engine probe with a
+            // 10s bound, so it must never be reached from the main thread. It was
+            // safe here ONLY because `checkRootAccess` happens to invoke its hook
+            // on IO — and its three sibling callbacks in MainViewModel all invoke
+            // theirs on Main, so "align this one with the others" would have moved
+            // a ten-second blocking probe onto the composition thread. The hop is
+            // made here, at the call site that knows the work is blocking, so the
+            // screen does not depend on someone else's dispatcher. Same pattern as
+            // the LaunchedEffect below.
+            permScope.launch {
+                permCheck = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.phoenix.droidvault.utils.PermissionChecker.check(context)
+                }
+                permCheckBusy = false
+            }
         }
     }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -167,25 +188,43 @@ fun SettingsTab(
     // a coroutine scope into a non-suspending click handler. That is a behaviour
     // change, not a warning cleanup, and is not worth making for a deprecation.
     val clipboard = LocalClipboardManager.current
-    LaunchedEffect(Unit) {
+
+    /**
+     * ONE timer for both the status line and the log itself.
+     *
+     * There were two, and they disagreed about whether Settings being open was
+     * reason enough to work. The snapshot loop was keyed on the sheet, with a
+     * comment explaining that polling twice a second for the whole time Settings
+     * is open — sheet closed, nothing to show — is work for nobody. The status
+     * loop ten lines above it did exactly that, unkeyed, and nobody applied the
+     * same reasoning to it: two `File.length()` calls at 2 Hz for as long as the
+     * user sat in Settings reading a toggle.
+     *
+     * So: one loop, and the cadence follows what is on screen. The status still
+     * refreshes with the sheet closed, because the row above it is visible then
+     * — but a byte counter does not need 2 Hz, and a snapshot of 2000 strings
+     * certainly does not need it while nothing is displaying it.
+     */
+    LaunchedEffect(showLogSheet) {
         while (true) {
             diagStatus = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 DroidVaultLogger.statusSummary(context)
             }
-            kotlinx.coroutines.delay(500)
-        }
-    }
-
-    // Separate effect, keyed on visibility. The snapshot is a synchronized copy
-    // of up to 2000 strings and it used to run on the MAIN thread twice a
-    // second for the whole time Settings was open, even with the sheet closed.
-    // Off-thread and only while the sheet is actually showing something.
-    LaunchedEffect(showLogSheet) {
-        while (showLogSheet) {
-            logLines = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                DroidVaultLogger.snapshot()
+            if (showLogSheet) {
+                val snapshot = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    DroidVaultLogger.snapshot()
+                }
+                // Published ONLY on a real change. This replaced the list
+                // wholesale every tick, so with the sheet open and no run going
+                // the same 2000 strings were handed to a LazyColumn twice a
+                // second and every visible row recomposed. Comparing on the IO
+                // thread also gives the list a STABLE IDENTITY between ticks,
+                // which is what stops it re-keying — and a content `key` would
+                // risk a duplicate-key crash on two identical lines inside one
+                // millisecond, which a millisecond-resolution format allows.
+                if (snapshot != logLines) logLines = snapshot
             }
-            kotlinx.coroutines.delay(500)
+            kotlinx.coroutines.delay(if (showLogSheet) 500L else 2_000L)
         }
     }
 
@@ -332,7 +371,7 @@ fun SettingsTab(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = 24.dp)
-                .animateContentSize(animationSpec = tween(350, easing = FastOutSlowInEasing)),
+                .animateContentSize(animationSpec = DvMotion.settle(DvMotion.emphasised)),
             shape = RoundedCornerShape(30.dp),
             color = MaterialTheme.colorScheme.surfaceContainer,
             tonalElevation = 0.dp
@@ -352,7 +391,6 @@ fun SettingsTab(
                             Text(
                                 "Vault Location",
                                 style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Spacer(modifier = Modifier.height(2.dp))
@@ -443,7 +481,6 @@ fun SettingsTab(
                 Text(
                     "Backup Folders",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
@@ -537,7 +574,6 @@ fun SettingsTab(
                 Text(
                     "What's in my vault folder",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
@@ -685,7 +721,6 @@ fun SettingsTab(
                         Text(
                             "Appearance",
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Spacer(modifier = Modifier.height(2.dp))
@@ -708,7 +743,6 @@ fun SettingsTab(
                 Text(
                     "Safety Consents",
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
                 )
@@ -773,7 +807,6 @@ fun SettingsTab(
                     Text(
                         "Permissions",
                         style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f)
                     )
@@ -862,7 +895,6 @@ fun SettingsTab(
                                 "Fix: Re-grant",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.error,
-                                fontWeight = FontWeight.SemiBold
                             )
                         }
 
@@ -918,7 +950,6 @@ fun SettingsTab(
                         Text(
                             "Diagnostics logger",
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Spacer(modifier = Modifier.height(2.dp))
@@ -952,7 +983,8 @@ fun SettingsTab(
                         contentDescription = "About"
                     )
                     Spacer(modifier = Modifier.width(16.dp))
-                    Column {                        Text("About", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                    Column {
+                        Text("About", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
                         Spacer(modifier = Modifier.height(2.dp))
                         Text("What Droid Vault does, and this build's details", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -963,12 +995,17 @@ fun SettingsTab(
                 // the same FileProvider staging dir as automation exports
                 // (cache-path automation-exports/, authority in the manifest).
                 if (showLogSheet) {
-                    ModalBottomSheet(onDismissRequest = { showLogSheet = false }) {
+                    ModalBottomSheet(
+                        onDismissRequest = { showLogSheet = false },
+                        // Matches the theme sheet above. Left at the default this
+                        // one sat on a different surface from every other sheet in
+                        // the app, which nobody notices until two are open.
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                    ) {
                         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
                             Text(
                                 "Live log",
                                 style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Bold
                             )
                             Text(
                                 if (diagEnabled) diagStatus
@@ -977,6 +1014,57 @@ fun SettingsTab(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Spacer(modifier = Modifier.height(8.dp))
+
+                            // A severity floor and a search, because 2000 lines
+                            // in one grey is not a diagnostic tool, it is a file.
+                            // The question this screen exists to answer is "what
+                            // went wrong", and that is one E line somewhere in
+                            // the middle of them.
+                            var minLevel by rememberSaveable { mutableStateOf('I') }
+                            var logQuery by rememberSaveable { mutableStateOf("") }
+                            val visible = remember(logLines, minLevel, logQuery) {
+                                DiagLog.filter(logLines, minLevel, logQuery)
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                DiagLevelChip("All", selected = minLevel == 'V') { minLevel = 'V' }
+                                DiagLog.LEVELS.forEach { lv ->
+                                    DiagLevelChip(
+                                        label = lv.toString(),
+                                        selected = minLevel == lv,
+                                        tint = diagLevelTint(lv)
+                                    ) {
+                                        // Tapping the active level returns to
+                                        // everything, so there is always a way
+                                        // back to the full log without hunting
+                                        // for an "off" state.
+                                        minLevel = if (minLevel == lv) 'V' else lv
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = logQuery,
+                                onValueChange = { logQuery = it },
+                                singleLine = true,
+                                placeholder = { Text("Search tags and messages") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Search, contentDescription = null)
+                                },
+                                trailingIcon = {
+                                    if (logQuery.isNotEmpty()) {
+                                        TextButton(onClick = { logQuery = "" }) { Text("Clear") }
+                                    }
+                                },
+                                shape = CircleShape,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+
                             Row {
                                 TextButton(onClick = {
                                     logScope.launch {
@@ -1004,8 +1092,20 @@ fun SettingsTab(
                                         val text = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                             DroidVaultLogger.recent(500)
                                         }
-                                        clipboard.setText(AnnotatedString(text))
-                                        context.safeToast("Copied ${text.lines().size} lines", Toast.LENGTH_SHORT)
+                                        // `"".lines()` is a ONE-element list, so
+                                        // an empty ring counted as "Copied 1 lines"
+                                        // AND put an empty string on the
+                                        // clipboard — right after Clear, which is
+                                        // exactly when someone tries it.
+                                        if (text.isBlank()) {
+                                            context.safeToast("Nothing to copy", Toast.LENGTH_SHORT)
+                                        } else {
+                                            clipboard.setText(AnnotatedString(text))
+                                            context.safeToast(
+                                                "Copied ${AppParts.count(text.lines().size, "line")}",
+                                                Toast.LENGTH_SHORT
+                                            )
+                                        }
                                     }
                                 }) { Text("Copy") }
                                 TextButton(onClick = {
@@ -1013,28 +1113,117 @@ fun SettingsTab(
                                         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                             DroidVaultLogger.clearAll(context)
                                         }
-                                        logLines = DroidVaultLogger.snapshot()
+                                        logLines = emptyList()
                                         diagStatus = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                             DroidVaultLogger.statusSummary(context)
                                         }
                                     }
                                 }) { Text("Clear") }
                             }
-                            val listState = rememberLazyListState()
-                            LaunchedEffect(logLines.size) {
-                                if (logLines.isNotEmpty()) listState.scrollToItem(logLines.size - 1)
+
+                            if (visible.isEmpty() && logLines.isNotEmpty()) {
+                                Text(
+                                    "Nothing matches. " +
+                                        AppParts.count(logLines.size, "line") + " in memory" +
+                                        // `!= 'V'`, NOT `> 'V'`. The levels are
+                                        // ordered by SEVERITY in DiagLog's own
+                                        // table, and a Chan's numeric order is
+                                        // the alphabet: 'E' is 69 and 'V' is 86,
+                                        // so the comparison was true for W and
+                                        // false for E, D and I. Caught on the
+                                        // device by tapping the E chip and
+                                        // reading a sentence that had lost the
+                                        // one word explaining why it was empty.
+                                        (if (minLevel != 'V') " at $minLevel or worse" else "") +
+                                        (if (logQuery.isNotBlank()) " matching \"$logQuery\"" else "") +
+                                        ".",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(vertical = 12.dp)
+                                )
                             }
-                            LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().height(420.dp)) {
+
+                            val listState = rememberLazyListState()
+                            // Follow the tail ONLY while the reader is already
+                            // at it. This was an unconditional
+                            // `scrollToItem(size - 1)` on every size change, and
+                            // the log grows many times a second during a run —
+                            // so scrolling up to read a line was impossible,
+                            // because the next line yanked the view back down.
+                            // That is invariant 31's shape on a scroll position:
+                            // a live view that moves when nobody asked it to is
+                            // worse than a static one.
+                            // Where the tail goes, and when it does not.
+                            //
+                            // Two separate questions, and conflating them is
+                            // what broke this twice. ARRIVALS are governed by
+                            // `shouldStickToTail`: follow only while the reader
+                            // is already there, because scrolling up is a
+                            // statement and the log grows many times a second
+                            // during a run. The OPENING is not governed by it
+                            // at all -- on the first frame the list is at the top
+                            // purely because it has just been laid out, so
+                            // "is the reader at the tail" is false before anyone
+                            // has read anything, and a conditional scroll does
+                            // nothing. That left the sheet OPENING AT THE OLDEST
+                            // LINE, twice over: first because nothing was laid
+                            // out to measure, and again once the wait was added
+                            // and the measurement returned "not at the tail".
+                            //
+                            // `tailChosen` is remembered OUTSIDE the effect, so
+                            // it survives the effect restarting on every size
+                            // change -- declared inside it, every arriving line
+                            // would look like a first frame and yank the reader
+                            // back down. It is inside `if (showLogSheet)`, so
+                            // closing and reopening the sheet decides afresh.
+                            var tailChosen by remember { mutableStateOf(false) }
+                            LaunchedEffect(visible.size) {
+                                // Wait for a real layout before asking anything:
+                                // on the opening frame `layoutInfo` is empty.
+                                snapshotFlow { listState.layoutInfo.visibleItemsInfo.size }
+                                    .first { it > 0 }
+                                if (!tailChosen) {
+                                    tailChosen = true
+                                    // Instant, not animated: the jump from the
+                                    // top of a 2000-line log is not a
+                                    // transition, it is an arrival.
+                                    listState.scrollToItem(visible.size - 1)
+                                } else {
+                                    val last =
+                                        listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index
+                                    if (last != null && DiagLog.shouldStickToTail(last, visible.size)) {
+                                        // Animated, because this one is a line or
+                                        // two arriving and the movement is the point.
+                                        listState.animateScrollToItem(visible.size - 1)
+                                    }
+                                }
+                            }
+                            // Breathing room before the log. At a 2x font the
+                            // list is scrolled near its end, so its first row
+                            // is half a line tall and sat directly against the
+                            // buttons -- legible, but reading as one run-on
+                            // block rather than a control and its output.
+                            Spacer(modifier = Modifier.height(4.dp))
+                            // heightIn, NOT height. A fixed 420dp holds a
+                            // handful of lines once the user turns their font
+                            // up, and the sheet's own column does not scroll,
+                            // so a short log should be allowed to be short.
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 420.dp)
+                            ) {
                                 // Was items(logLines.size) { i -> Text(logLines[i]) — the
                                 // count is captured when the scope runs but the read
                                 // happens later, lazily, while Clear replaces the
                                 // MutableState under the list's feet -> IOOBE.
-                                items(logLines) { line ->
+                                items(visible) { line ->
                                     Text(
                                         line,
                                         style = MaterialTheme.typography.bodySmall,
                                         fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = diagLevelTint(DiagLog.levelOf(line))
                                     )
                                 }
                             }
@@ -1045,5 +1234,57 @@ fun SettingsTab(
             }
         }
         Spacer(modifier = Modifier.height(24.dp))
+    }
+}
+
+/**
+ * The colour a log line wears, by severity.
+ *
+ * The only real question this screen exists to answer is "what went wrong", and
+ * with 2000 lines in one grey the answer is a needle in a haystack you have to
+ * read with a thumb. So the level is carried by hue as well as by the letter
+ * already in the text.
+ *
+ * **A line with no level gets the neutral colour, not a guess.** `DiagLog`
+ * returns null for a line this app did not write, and inventing a severity for
+ * it would be the one thing a diagnostic view must not do.
+ *
+ * The hues are the app's own `DvRole` accents, which `AccentContrastTest` pins
+ * against the sheet surface in all three themes — the pairing is measured, not
+ * eyeballed, and a role that failed would fail the build rather than ship.
+ */
+@Composable
+private fun diagLevelTint(level: Char?): Color = when (level) {
+    'E' -> dvAccent(DvRole.Error)
+    'W' -> dvAccent(DvRole.Warning)
+    'I' -> dvAccent(DvRole.Info)
+    // D and V are the narration. They are deliberately NOT dimmed: a reader who
+    // has asked for debug output is looking for it, and fading it to make room
+    // for the severity colours would punish the only person who asked for it.
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
+}
+
+/** One severity control. Tapping the active level returns to showing all. */
+@Composable
+private fun DiagLevelChip(
+    label: String,
+    selected: Boolean,
+    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = if (selected) tint.copy(alpha = 0.20f)
+        else MaterialTheme.colorScheme.surfaceContainerHighest,
+        contentColor = if (selected) tint else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.height(30.dp)
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 11.dp)) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
     }
 }

@@ -195,7 +195,17 @@ object DroidVaultLogger {
         return removed
     }
 
-    /** Human summary for the Settings row: file size + in-memory line count. */
+    /**
+     * Human summary for the Settings row: file size + in-memory line count.
+     *
+     * The two figures used to be joined as "82.00 KB on disk · 6 lines in
+     * memory", which reads as a contradiction — and it is one to anyone who has
+     * not internalised that the ring is per-launch while the file is not. The
+     * file is everything written since midnight INCLUDING the rotated
+     * generation, and it survives the app being killed; the ring is the last
+     * [RING_CAP] lines of THIS process. Naming each one is the whole fix; the
+     * numbers were never wrong.
+     */
     fun statusSummary(context: Context): String {
         val bytes = try {
             val dir = logsDir(context)
@@ -207,7 +217,8 @@ object DroidVaultLogger {
             0L
         }
         val count = synchronized(lock) { ring.size }
-        return "${Formatters.formatKb((bytes + 1023) / 1024)} on disk · $count lines in memory"
+        return "${Formatters.formatBytes(bytes)} in today's log · " +
+            "$count ${if (count == 1) "line" else "lines"} since launch"
     }
 
     // ---------- formatting (pure, unit-tested) ----------

@@ -14,6 +14,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.phoenix.droidvault.MainActivity
 import com.phoenix.droidvault.R
+import com.phoenix.droidvault.models.TransferPhase
 import com.phoenix.droidvault.models.VaultTransfer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +43,21 @@ data class TransferStatus(
     val op: TransferOp? = null,
     val percent: Int = -1,
     val detail: String = "",
+    /**
+     * The phase's own human name — "Restoring backups into your vault".
+     *
+     * `VaultTransferManager` has computed a [TransferPhase] for every callback
+     * since the phases were introduced, and the service dropped it on the floor:
+     * `TransferBus.report(percent, detail)` forwarded two of the three values,
+     * so the one sentence that says WHAT STAGE the run is in never reached any
+     * screen. A 34 GB import therefore showed the engine's step text and nothing
+     * that distinguished "counting the pieces" from "writing them".
+     *
+     * Carried as the LABEL, not the enum: this type is read by the UI and by the
+     * notification, and both want the words. The enum stays in the model where
+     * it is tested.
+     */
+    val phaseLabel: String = "",
     val running: Boolean = false
 ) {
     /** True only once something real has happened. */
@@ -73,8 +89,12 @@ object TransferBus {
         _status.value = TransferStatus(op = op, percent = -1, detail = "Starting…", running = true)
     }
 
-    internal fun report(percent: Int, detail: String) {
-        _status.value = _status.value.copy(percent = percent, detail = detail)
+    internal fun report(percent: Int, detail: String, phase: TransferPhase) {
+        _status.value = _status.value.copy(
+            percent = percent,
+            detail = detail,
+            phaseLabel = phase.label
+        )
     }
 
     internal fun finish(result: VaultTransferManager.Result) {
@@ -193,9 +213,9 @@ class TransferService : Service() {
                     TransferOp.EXPORT -> VaultTransferManager.export(
                         this@TransferService, vault,
                         cancel = flag, splitBytes = split
-                    ) { pct, detail, _ ->
-                        TransferBus.report(pct, detail)
-                        refresh(TransferOp.EXPORT, pct, detail)
+                    ) { pct, detail, phase ->
+                        TransferBus.report(pct, detail, phase)
+                        refresh(TransferOp.EXPORT, pct, detail, phase.label)
                     }
 
                     TransferOp.IMPORT -> {
@@ -222,9 +242,9 @@ class TransferService : Service() {
                             VaultTransfer.Merge.valueOf(merge ?: VaultTransfer.Merge.entries.first().name),
                             cancel = flag,
                             sourceParts = parts
-                        ) { pct, detail, _ ->
-                            TransferBus.report(pct, detail)
-                            refresh(TransferOp.IMPORT, pct, detail)
+                        ) { pct, detail, phase ->
+                            TransferBus.report(pct, detail, phase)
+                            refresh(TransferOp.IMPORT, pct, detail, phase.label)
                         }
                     }
                 }
@@ -273,7 +293,12 @@ class TransferService : Service() {
         }
     }
 
-    private fun build(op: TransferOp, percent: Int, detail: String): Notification {
+    private fun build(
+        op: TransferOp,
+        percent: Int,
+        detail: String,
+        phaseLabel: String = ""
+    ): Notification {
         val open = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java)
@@ -288,6 +313,10 @@ class TransferService : Service() {
         val title = if (op == TransferOp.EXPORT) "Exporting backups" else "Importing backups"
         return NotificationCompat.Builder(this, TRANSFER_CHANNEL_ID)
             .setContentTitle(title)
+            // The stage, above the step text. The shade is often all a user sees
+            // of a long run, and "Restoring backups into your vault" answers
+            // "why is this slow" in a way the per-file detail cannot.
+            .apply { if (phaseLabel.isNotEmpty()) setSubText(phaseLabel) }
             .setContentText(detail)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(true)
@@ -299,10 +328,10 @@ class TransferService : Service() {
     }
 
     /** Push a fresh progress line into the running notification. */
-    internal fun refresh(op: TransferOp, percent: Int, detail: String) {
+    internal fun refresh(op: TransferOp, percent: Int, detail: String, phaseLabel: String = "") {
         runCatching {
             getSystemService(NotificationManager::class.java)
-                ?.notify(NOTIFICATION_ID, build(op, percent, detail))
+                ?.notify(NOTIFICATION_ID, build(op, percent, detail, phaseLabel))
         }
     }
 

@@ -217,6 +217,20 @@ object VaultTransfer {
         vaultKb * (if (split) 2 else 1) + headroomKb
 
     /**
+     * The headroom both gates charge, in KB.
+     *
+     * These were `private const` inside [com.phoenix.droidvault.utils.VaultTransferManager],
+     * which made them unreachable from the confirmation sheets. The sheets quote
+     * a need so the user can see the consequence before starting, and a second
+     * copy of this number is exactly two answers waiting to disagree — the
+     * dialog says 40 GB is fine and the gate then refuses 40 GB. So they live
+     * here, beside the pure functions that consume them, and both the sheet and
+     * the gate name these.
+     */
+    const val IMPORT_HEADROOM_KB = 512L * 1024L
+    const val EXPORT_HEADROOM_KB = 512L * 1024L
+
+    /**
      * Floor throughput a transfer bound may assume: 2 MB/s.
      *
      * Chosen from what this storage actually does, on the reference device:
@@ -660,5 +674,130 @@ object TransferProgress {
         }
 
         val isEmpty: Boolean get() = sizes.isEmpty()
+    }
+
+    /**
+     * The "how long is this going to take" arithmetic, kept honest.
+     *
+     * Invariant 31: *an estimate that moves the wrong way is worse than none.*
+     * Every figure below is derived from a counter that can stall — the install
+     * copy is a weighted average that stops moving while one big app is being
+     * written, and the survey has no byte counter at all — so these rules are
+     * about refusing to speak rather than about being clever.
+     *
+     * Two specific lies this exists to prevent:
+     *
+     *  - **A rate computed over a stalled window reads as zero**, and "0 min
+     *    left" is worse than saying nothing. So the rate is measured over a
+     *    wall-clock window, and the estimate is withheld until one exists.
+     *  - **An estimate derived from a fraction that is itself a part count.**
+     *    §2.25 measured "24.6 GB done" that was `appSize x mean(part
+     *    percentages)` — a count wearing a byte label. [label] only ever sees
+     *    real byte totals, and refuses when there are none.
+     *
+     * Pure and static, so a test can put a clock in and get the same answer
+     * twice.
+     */
+    object Estimate {
+
+        /**
+         * Below this the answer is noise: a few hundred MB over two seconds
+         * extrapolates wildly either way.
+         */
+        const val MIN_ELAPSED_MS = 8_000L
+
+        /**
+         * How far back the rate is measured. Long enough to ride out one app's
+         * install and the writeback burst after a big file, short enough to
+         * notice the run actually speeding up or slowing down.
+         */
+        const val RATE_WINDOW_MS = 30_000L
+
+        /** Held inside the window, the rate is measurable but not trustworthy. */
+        data class Sample(val atMs: Long, val percent: Int)
+
+        /**
+         * Percent per second over the window, or null when there is no sample far
+         * enough back — which is exactly the "too early to say" case, and the
+         * only honest answer for it is silence.
+         *
+         * Measured from `percent`, not from a byte count, and that is not a
+         * compromise. [TransferProgress.percent] is monotonic and computed
+         * against a real recorded total, so percent-of-total is a genuine
+         * fraction — unlike §2.25's `appSize x mean(part percentages)`, which
+         * was a count wearing a byte label. The alternative was to re-parse the
+         * "312 MB of 1.4 GB" display string to recover the bytes, which is
+         * deriving an estimate from a presentation of a number instead of from
+         * the number.
+         *
+         * An indeterminate phase reports `-1`, so it can never form a positive
+         * rate: the survey phase, where the engine is inflating the whole
+         * archive just to count it, produces no estimate at all. That is the
+         * point — there is no honest answer during the survey, and a bar that
+         * claims one is the lie invariant 31 is about.
+         */
+        fun windowedRate(samples: List<Sample>): Double? {
+            if (samples.size < 2) return null
+            val newest = samples.last()
+            val oldest = samples.firstOrNull { newest.atMs - it.atMs >= RATE_WINDOW_MS }
+                ?: return null
+            val dt = newest.atMs - oldest.atMs
+            val dp = newest.percent - oldest.percent
+            if (dt <= 0L || dp <= 0) return null
+            return dp.toDouble() / (dt.toDouble() / 1000.0)
+        }
+
+        /**
+         * "about 4 min left", or null when no honest answer exists.
+         *
+         * Rounds UP to whole minutes: rounding down turns 61 seconds into
+         * "1 min left" and then it is still going.
+         */
+        fun label(percent: Int, percentPerSecond: Double): String? {
+            if (percentPerSecond <= 0.0 || percent !in 0..99) return null
+            val remainingPercent = (100 - percent).toDouble()
+            val seconds = remainingPercent / percentPerSecond
+            if (!seconds.isFinite() || seconds <= 0.0) return null
+            val minutes = kotlin.math.ceil(seconds / 60.0).toInt()
+            return when {
+                minutes <= 1 -> "about a minute left"
+                minutes < 60 -> "about $minutes min left"
+                else -> {
+                    val hours = minutes / 60
+                    val rest = minutes % 60
+                    if (rest == 0) "about ${AppParts.count(hours, "hour")} left"
+                    else "about ${AppParts.count(hours, "hour")} $rest min left"
+                }
+            }
+        }
+
+        /**
+         * "11 min elapsed" — how long this has been going. A measured fact
+         * rather than an estimate, so it is never withheld. Capped at an hour
+         * because a run that has been going that long is better described by
+         * the phase than by a bigger number.
+         */
+        fun elapsedLabel(elapsedMs: Long): String? {
+            if (elapsedMs < MIN_ELAPSED_MS) return null
+            val totalMinutes = (elapsedMs / 60_000L).toInt()
+            if (totalMinutes < 1) return "under a minute elapsed"
+            if (totalMinutes > 60) return "over an hour elapsed"
+            return "${totalMinutes} min elapsed"
+        }
+
+        /**
+         * "12.4 MB/s", so the estimate has something visible behind it.
+         *
+         * Needs the archive's real total, which the caller has from its own
+         * manifest; without it the rate is simply not shown rather than being
+         * guessed from a default.
+         */
+        fun rateLabel(percentPerSecond: Double, totalBytes: Long): String? {
+            if (percentPerSecond <= 0.0 || !percentPerSecond.isFinite()) return null
+            if (totalBytes <= 0L) return null
+            val bytesPerSecond = totalBytes.toDouble() * percentPerSecond / 100.0
+            if (bytesPerSecond <= 0.0 || !bytesPerSecond.isFinite()) return null
+            return "${humanBytes(bytesPerSecond.toLong())}/s"
+        }
     }
 }

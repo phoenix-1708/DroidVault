@@ -1,8 +1,6 @@
 package com.phoenix.droidvault.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -13,31 +11,24 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -49,7 +40,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,14 +60,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.phoenix.droidvault.models.AppInfo
+import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.DvRole
 import com.phoenix.droidvault.ui.theme.dvAccent
 import com.phoenix.droidvault.ui.theme.dvContainer
 import coil.compose.AsyncImage
-import kotlinx.coroutines.delay
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.time.Duration.Companion.milliseconds
 
 @Composable
 fun CircularCheckbox(
@@ -116,92 +105,69 @@ fun CircularCheckbox(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+/**
+ * One named action, in a row that WRAPS rather than scrolls.
+ *
+ * This used to be a 48 dp bare circle that revealed its name for three seconds when
+ * tapped, inside a `LazyRow` that pushed the last controls off the right edge with
+ * no hint they existed. On the Manage screen that left "All System Apps" and
+ * "Auto Select" reachable only by swiping a row that looked complete — and
+ * `uiautomator` on the reference device returns `contentDescription` for nothing
+ * useful, so a collapsed chip was unidentifiable to a screen reader too.
+ *
+ * So the name is permanent, and the caller wraps the row. The wrap is not a
+ * concession: `FlowChipGroup` in `ConfigUi.kt` already does exactly this for the
+ * Automation tab's device chips, and this is the same control in the place that
+ * had not caught up.
+ *
+ * The cost is honest and worth stating: six chips is two lines and seven is
+ * three. That is the price of every control being named and reachable without a
+ * gesture, and it buys back a row that used to lie about its own contents.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AnimatedFilterChip(
     selected: Boolean,
     onClick: () -> Unit,
     label: String,
     leadingIcon: ImageVector,
-    showLabel: Boolean,
-    onExpand: () -> Unit,
-    /**
-     * Whether the label may collapse to the bare icon.
-     *
-     * Collapsing is right for a mutually exclusive pair (Debloat/Restore) where
-     * one chip is always lit and the split is remembered. It is wrong for a set
-     * of independent toggles: they all read as identical unlabelled circles,
-     * which is exactly why the component chips were reported as impossible to
-     * tell apart. Those pass false and keep their text.
-     */
-    collapsible: Boolean = true,
     /** Disables the chip. A permanently-lit chip the user cannot press is a
      *  dead control, so "nothing to do" must read as unavailable, not enabled. */
     enabled: Boolean = true,
     selectedContainerColor: Color = MaterialTheme.colorScheme.secondaryContainer,
     selectedContentColor: Color = MaterialTheme.colorScheme.onSecondaryContainer
 ) {
-    val labelVisible = if (collapsible) showLabel else true
     val containerColor =
         if (selected) selectedContainerColor else MaterialTheme.colorScheme.surfaceContainerHigh
     val contentColor =
         if (selected) selectedContentColor else MaterialTheme.colorScheme.onSurfaceVariant
 
-    val requester = remember { BringIntoViewRequester() }
-
-    LaunchedEffect(showLabel) {
-        if (showLabel) {
-            delay(100.milliseconds)
-            requester.bringIntoView()
-        }
-    }
-
     Surface(
         selected = selected,
         enabled = enabled,
-        onClick = {
-            onClick()
-            onExpand()
-        },
+        onClick = onClick,
         shape = CircleShape,
         color = containerColor,
         contentColor = contentColor,
-        modifier = Modifier
-            .height(32.dp)
-            .bringIntoViewRequester(requester)
-            .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+        modifier = Modifier.height(30.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(end = if (labelVisible) 12.dp else 0.dp)
+            modifier = Modifier.padding(start = 8.dp, end = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .width(48.dp)
-                    .fillMaxHeight(),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = leadingIcon,
-                    // Named whenever the text is hidden, or a collapsed chip is an
-                    // unlabelled circle to a screen reader as well as to the eye.
-                    contentDescription = if (labelVisible) null else label,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-
-            AnimatedVisibility(
-                visible = labelVisible,
-                enter = expandHorizontally(expandFrom = Alignment.Start) + fadeIn(),
-                exit = shrinkHorizontally(shrinkTowards = Alignment.Start) + fadeOut()
-            ) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.ExtraBold,
-                    modifier = Modifier.padding(start = 0.dp)
-                )
-            }
+            Icon(
+                imageVector = leadingIcon,
+                // The text is always on screen, so the glyph is decoration and
+                // naming it too would read the label twice.
+                contentDescription = null,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1
+            )
         }
     }
 }
@@ -226,7 +192,7 @@ fun ExpressiveRefreshIndicator(
             initialValue = 0f,
             targetValue = 360f,
             animationSpec = infiniteRepeatable(
-                animation = tween(1200, easing = LinearEasing),
+                animation = DvMotion.rotate(),
                 repeatMode = RepeatMode.Restart
             ),
             label = "rotation"
@@ -329,10 +295,7 @@ fun MenuCard(
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (isPressed) 0.96f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
+        animationSpec = DvMotion.Springs.settle(),
         label = "MenuCardBounce"
     )
 
@@ -367,7 +330,6 @@ fun MenuCard(
                 Text(
                     text = title,
                     style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.ExtraBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(modifier = Modifier.height(2.dp))
@@ -475,7 +437,6 @@ fun AppListItem(
             Text(
                 text = app.label,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.ExtraBold,
                 color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -518,7 +479,6 @@ fun AppListItem(
                         style = MaterialTheme.typography.labelSmall,
                         color = if (comps.isEmpty()) MaterialTheme.colorScheme.error
                         else MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Bold
                     )
                 }
             } else if (showBackupTime && app.backupTime.isNotEmpty()) {
@@ -542,7 +502,6 @@ fun AppListItem(
                     text = app.size,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold,
                     maxLines = 1
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -558,7 +517,7 @@ fun AppListItem(
 @Composable
 fun ShimmerAppListItem() {
     val transition = rememberInfiniteTransition(label = "shimmer")
-    val alpha by transition.animateFloat(initialValue = 0.2f, targetValue = 0.6f, animationSpec = infiniteRepeatable(animation = tween(durationMillis = 800, easing = FastOutSlowInEasing), repeatMode = RepeatMode.Reverse), label = "alpha")
+    val alpha by transition.animateFloat(initialValue = 0.2f, targetValue = 0.6f, animationSpec = infiniteRepeatable(animation = DvMotion.breathe(), repeatMode = RepeatMode.Reverse), label = "alpha")
     val shimmerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
 
     Row(

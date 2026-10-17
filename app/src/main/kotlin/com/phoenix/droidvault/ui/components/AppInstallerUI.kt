@@ -362,7 +362,15 @@ fun BatchInstallerBody(
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        "Successfully installed ${com.phoenix.droidvault.models.AppParts.count(successCount, "app")}}",
+                        // A `}` after the template's own is a literal character
+                        // and rendered as one: this read "Successfully installed
+                        // 1 app}" on the only screen that reports what a run
+                        // installed. Found 2026-10-15 by the guard named in
+                        // `user-facing string keeps no template to itself` —
+                        // the same defect §2.67 recorded for the per-run
+                        // subtitle, and the third copy of it.
+                        "Successfully installed " +
+                            com.phoenix.droidvault.models.AppParts.count(successCount, "app"),
                         fontWeight = FontWeight.Bold
                     )
                 }

@@ -447,6 +447,47 @@ data class VerificationReport(
         deviceItems.filter { it.changed }.map { it.archiveName }
 }
 
+/**
+ * The findings of a verification, NAMES, for the diagnostics log.
+ *
+ * The log line that already existed is [summaryLine], and it is counts: "1 of 7
+ * device data archives damaged, 6 of 7 readable". That is a fine sentence for a
+ * dialog and a bad one for a bug report, because the question a field report
+ * asks is *which file* — and the log is the artefact that actually travels.
+ * Invariant 41 requires a finding to name the archive it is about; on screen
+ * that was true, and here it was not.
+ *
+ * Capped at [MAX_NAMES]. A vault with 110 damaged apps would otherwise produce
+ * one line nobody reads to the end, and an unreadable log is the same as no
+ * log. The overflow is stated rather than silently dropped, so a reader can tell
+ * "these are all of them" from "there are more".
+ *
+ * Pure, and so testable: the behaviour worth pinning is the cap and the
+ * "nothing found" answer, neither of which needs a device.
+ */
+fun VerificationReport.findingsLine(maxNames: Int = MAX_NAMES): String {
+    val damagedApps = apps.filter { !it.ok }.map { it.packageName }
+    val damaged = deviceDamagedArchives()
+    val changed = deviceChangedArchivesNamed()
+
+    fun cap(names: List<String>): String = when {
+        names.isEmpty() -> ""
+        names.size <= maxNames -> names.joinToString(", ")
+        else -> names.take(maxNames).joinToString(", ") +
+            " and ${names.size - maxNames} more"
+    }
+
+    val parts = buildList {
+        if (damagedApps.isNotEmpty()) add("unreadable apps: ${cap(damagedApps)}")
+        if (damaged.isNotEmpty()) add("unreadable device archives: ${cap(damaged)}")
+        if (changed.isNotEmpty()) add("altered since written: ${cap(changed)}")
+    }
+    return if (parts.isEmpty()) "findings: none" else "findings — " + parts.joinToString("; ")
+}
+
+/** How many names a single findings line may carry before it overflows. */
+const val MAX_NAMES = 12
+
 object VerificationParser {
 
     /**

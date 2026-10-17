@@ -96,6 +96,7 @@ import androidx.compose.ui.unit.sp
 import com.phoenix.droidvault.BuildConfig
 import com.phoenix.droidvault.R
 import com.phoenix.droidvault.ui.components.DvIconBadge
+import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.DvRole
 import com.phoenix.droidvault.ui.theme.dvAccent
 import com.phoenix.droidvault.ui.theme.dvContainer
@@ -315,7 +316,6 @@ fun AboutScreen(
                     Text(
                         "phoenix-1708",
                         style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.primary
                     )
                     Spacer(Modifier.height(4.dp))
@@ -411,7 +411,6 @@ private fun AboutHero(
                             Text(
                                 versionChip,
                                 style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
                                 color = dvAccent(DvRole.Migrate),
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                             )
@@ -425,7 +424,6 @@ private fun AboutHero(
                     if (hasRoot) "Root backup & restore for Android"
                     else "Backup & restore for rooted Android",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Spacer(Modifier.height(5.dp))
@@ -562,7 +560,6 @@ private fun CapabilityGroupCard(group: CapabilityGroupData) {
                     Text(
                         group.title,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.ExtraBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
@@ -634,10 +631,7 @@ private fun AboutDisclosure(
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.985f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
+        animationSpec = DvMotion.Springs.settle(),
         label = "disclosurePress"
     )
     val chevronRotation by animateFloatAsState(
@@ -678,7 +672,6 @@ private fun AboutDisclosure(
                     Text(
                         title,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
@@ -721,7 +714,6 @@ private fun FactRow(fact: Fact) {
         Text(
             fact.term,
             style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurface
         )
         Spacer(Modifier.height(2.dp))
@@ -747,10 +739,7 @@ private fun AboutActionCard(
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.97f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
+        animationSpec = DvMotion.Springs.settle(),
         label = "actionPress"
     )
     Surface(
@@ -784,7 +773,6 @@ private fun AboutActionCard(
                 Text(
                     title,
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
                 Text(
@@ -830,7 +818,6 @@ private fun LiveStatusChip(chip: StatusChip) {
             Text(
                 chip.label,
                 style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -842,7 +829,6 @@ private fun SectionLabel(text: String) {
     Text(
         text.uppercase(),
         style = MaterialTheme.typography.labelMedium,
-        fontWeight = FontWeight.ExtraBold,
         letterSpacing = 1.1.sp,
         color = MaterialTheme.colorScheme.primary
     )

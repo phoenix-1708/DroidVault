@@ -16,6 +16,9 @@ import android.util.JsonToken
 import android.util.JsonWriter
 import android.util.Log
 import androidx.core.net.toUri
+import com.phoenix.droidvault.models.DeviceArchiveInfo
+import com.phoenix.droidvault.models.DeviceArchiveReader
+import com.phoenix.droidvault.models.DeviceDataItem
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -92,11 +95,60 @@ object DeviceManager {
         ).exec()
     }
 
-    fun getAvailableBackups(savedPath: String): Set<String> {
+    /**
+     * Every device archive, with its size and mtime, from ONE root fork.
+     *
+     * This replaces a bare `ls` of `Device/`, which answered only "is the name
+     * there" and left the Manage screen unable to say how big or how old
+     * anything was. A single `stat -c '%n %s %Y'` over the seven known archive
+     * names costs one fork instead of one `ls` plus a `stat` per file, and
+     * `stat` is silent for a missing file — so its absence from the output IS
+     * the absence of the file, with no second probe to interpret.
+     *
+     * The parse is [DeviceArchiveReader.parse], which is pure and tested without
+     * a device; this is only the shell edge. A vault folder the user renamed to
+     * contain a space is a normal thing, which is why the parser takes the last
+     * two fields as the numbers and rejoins the rest as the name.
+     *
+     * **The canary is what makes silence mean something.** `stat` is silent for
+     * a file that is not there, so "no output" has two completely different
+     * causes and the Manage screen renders them differently: every archive
+     * genuinely absent (a true answer — "0 of 7 backed up") and the shell
+     * itself failing (no root, no such volume), which is not an answer at all
+     * and rendered as the same false "0 of 7". So a marker is appended that the
+     * shell reaches only if it ran; if it is missing from the output, the read
+     * is a failure and the caller is told so.
+     *
+     * Without this the third state exists but is only reachable when
+     * `requireAbsPath` throws — which is the one failure mode nobody hits.
+     */
+    fun readDeviceArchives(savedPath: String): List<DeviceArchiveInfo> {
         ShellQuote.requireAbsPath(savedPath)
         val deviceDir = "$savedPath/Device"
-        return Shell.cmd("ls ${ShellQuote.q(deviceDir)}").exec().out.toSet()
+        val cmd = buildString {
+            append("stat -c '%n %s %Y'")
+            for (item in DeviceDataItem.entries) {
+                append(' ').append(ShellQuote.q("$deviceDir/${item.archiveFile}"))
+            }
+            append(" 2>/dev/null; echo ").append(SHELL_CANARY)
+        }
+        val out = Shell.cmd(cmd).exec().out
+        if (!out.any { it.trim() == SHELL_CANARY }) {
+            throw java.io.IOException("the shell produced no answer for $deviceDir")
+        }
+        return DeviceArchiveReader.parse(
+            out.filterNot { it.trim() == SHELL_CANARY },
+            deviceDir
+        )
     }
+
+    /**
+     * Printed only if the command line above actually ran.
+     *
+     * A name no `stat -c '%n %s %Y'` line can produce, so it cannot be confused
+     * with data: it has no spaces and is not a path.
+     */
+    private const val SHELL_CANARY = "__dv_device_read_ok"
 
     private const val ZAPDOS_PATH = "/data/adb/DroidVault/zapdos"
 
@@ -1660,7 +1712,7 @@ object DeviceManager {
         val acquiredHere = if (gateHeld) false else RunCoordinator.tryAcquire("device-data")
         if (!gateHeld && !acquiredHere) {
             val holder = RunCoordinator.currentOwner ?: "another operation"
-            android.util.Log.w("DeviceManager", "run refused: gate held by $holder")
+            DroidVaultLogger.w("Gate", "device-data run refused: gate held by $holder")
             updateState("Another operation is in progress ($holder)", -1)
             // THROWN, not returned: a plain return was read as success by BOTH
             // callers — Migrate showed "Restore Complete!" and automation

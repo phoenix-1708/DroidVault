@@ -188,6 +188,11 @@ object Trash {
     fun batchLabel(count: Int, kind: String): String = when (kind) {
         "apps" -> if (count == 1) "1 app" else "$count apps"
         "device backups" -> if (count == 1) "1 device backup" else "$count device backups"
+        // An export is one thing even when it is seventeen files, and it moved as
+        // one folder — so the count is always 1 in practice. Listed explicitly
+        // because the fallback "$count exports" reads as a raw plural and this
+        // is the sentence a user reads after deleting the only copy they had.
+        "exports" -> if (count == 1) "1 export" else "$count exports"
         else -> "$count $kind"
     }
 }

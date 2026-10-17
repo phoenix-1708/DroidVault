@@ -15,6 +15,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -168,7 +170,6 @@ fun InfoRow(
                 Text(
                     title,
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
                 )
                 if (value != null) {
                     Text(
@@ -211,7 +212,20 @@ private fun InfoBody(info: String, shown: Boolean) {
                 info,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                modifier = Modifier
+                    // SCROLLABLE, and the reason is length. Every explanation
+                    // here was one short paragraph until the Import page needed
+                    // four, separated by blank lines — which at a 2x font scale is
+                    // taller than the block it renders into. Without this the
+                    // text is clipped at the bottom of the screen with no way to
+                    // reach the rest, so the users who turn their font up are
+                    // exactly the ones who cannot finish reading.
+                    //
+                    // `ComponentHelpDialog` fixed the same hazard with
+                    // `verticalScroll`; a dialog is bounded by the screen, this
+                    // inline block is not, so the fix had to be made twice.
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
             )
         }
     }

@@ -56,6 +56,38 @@ object Formatters {
             else -> return "over a month ago"
         }
     }
+
+    /**
+     * A bare count, for a screen that states how many rows it holds.
+     *
+     * Not through `AppParts.count` because there is no noun to pluralise: this
+     * is the "3 exports" figure on a header, which has no "export" word in it
+     * once it is a heading. It exists so that figure is not assembled inline
+     * with a hand-written `== 1` test.
+     */
+    fun formatCount(count: Int): String = if (count == 1) "1" else "$count"
+
+    /**
+     * An export's age as a date and time a person recognises.
+     *
+     * "17 Oct 2026, 18:29" — taken from the newest file in the set, which is
+     * when the export finished, not when it was started.
+     *
+     * The names an export folder uses are human-readable for exactly this
+     * reason (`Formatters`/`VaultTransfer.exportFileName`), but a mtime is
+     * authoritative: a folder renamed by hand, or a file that arrived some other
+     * way, still has the truth. Falls back to the timestamp in the name only
+     * because "an unknown date" is a worse answer than an approximate one, and
+     * the name is what the user is looking at.
+     */
+    fun exportStamp(modifiedMs: Long): String {
+        if (modifiedMs <= 0L) return "Unknown date"
+        val zdt = java.time.Instant.ofEpochMilli(modifiedMs)
+            .atZone(java.time.ZoneId.systemDefault())
+        val day = zdt.format(java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy"))
+        val time = zdt.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+        return "$day, $time"
+    }
 }
 
 object Hashing {

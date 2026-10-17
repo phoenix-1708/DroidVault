@@ -1,6 +1,9 @@
 package com.phoenix.droidvault.ui.screens
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.provider.DocumentsContract
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -27,6 +30,7 @@ import com.phoenix.droidvault.models.VerdictStaleness
 import com.phoenix.droidvault.models.staleness
 import android.widget.Toast
 import android.net.Uri
+import com.phoenix.droidvault.ui.theme.DvMotion
 import java.io.File
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.IosShare
@@ -60,8 +64,10 @@ import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.SearchOff
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Delete
@@ -113,7 +119,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -131,12 +136,15 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.phoenix.droidvault.MainViewModel
 import com.phoenix.droidvault.models.AppInfo
+import com.phoenix.droidvault.models.deviceArchiveRows
 import com.phoenix.droidvault.models.AppParts
 import com.phoenix.droidvault.models.ChangeDetection
 import com.phoenix.droidvault.models.AppState
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.ui.components.AnimatedFilterChip
 import com.phoenix.droidvault.ui.components.AppListItem
+import com.phoenix.droidvault.ui.components.ExportConfirmSheet
+import com.phoenix.droidvault.ui.components.PickedImportSheet
 import com.phoenix.droidvault.ui.components.ExpressiveRefreshIndicator
 import com.phoenix.droidvault.ui.components.MenuCard
 import com.phoenix.droidvault.ui.theme.DvRole
@@ -148,10 +156,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import com.phoenix.droidvault.utils.getAvatarColor
 import coil.compose.AsyncImage
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlin.time.Duration.Companion.milliseconds
 import java.util.Locale
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
@@ -171,6 +176,20 @@ fun MigratorTab(
     // mode of its own: it must keep the mode underneath intact so Back returns
     // to the app list the user came from rather than to the Migrate menu.
     val editorPackage by viewModel.componentEditorPackage.collectAsStateWithLifecycle()
+    // Needed by the Import page's "somewhere else" launcher below and by its
+    // honest failure when no documents provider exists.
+    val context = LocalContext.current
+
+    // "Find it somewhere else…" from the Import page. Same destination as the
+    // picker in MigratorActionScreen, but the intent is built by hand so it can
+    // carry EXTRA_INITIAL_URI — which the OpenDocument contract cannot express.
+    PickedImportSheet(viewModel)
+    val browseTransfer = rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uri = result.data?.data ?: return@rememberLauncherForActivityResult
+        viewModel.importVaultFromUri(context, uri)
+    }
     val detailApps by viewModel.detailApps.collectAsStateWithLifecycle()
 
     AnimatedContent(
@@ -185,16 +204,16 @@ fun MigratorTab(
             when {
                 // Opening or closing the component page slides over the list.
                 hadEditor != hasEditor ->
-                    (slideInHorizontally(tween(220, easing = FastOutSlowInEasing)) { it } +
-                            fadeIn(tween(180))) togetherWith
-                            (slideOutHorizontally(tween(200, easing = FastOutLinearInEasing)) { it } +
-                                    fadeOut(tween(140)))
+                    (slideInHorizontally(DvMotion.settle()) { it } +
+                            fadeIn(DvMotion.settle())) togetherWith
+                            (slideOutHorizontally(DvMotion.decelerate()) { it } +
+                                    fadeOut(DvMotion.settle(DvMotion.quick)))
 
                 // Back out of a submenu to the menu: no trailing slide, for the
                 // same reason the Auto tab skips it (double animation).
                 !wasMenu && isMenu -> EnterTransition.None togetherWith ExitTransition.None
-                else -> slideInHorizontally(tween(150, easing = FastOutSlowInEasing)) { it } togetherWith
-                        fadeOut(tween(130))
+                else -> slideInHorizontally(DvMotion.settle(DvMotion.quick)) { it } togetherWith
+                        fadeOut(DvMotion.settle(DvMotion.quick))
             }
         },
         label = "MigratorTransition"
@@ -222,6 +241,25 @@ fun MigratorTab(
             }
         } else if (isMenu) {
             MigratorMenu(viewModel)
+        } else if (liveAppState.migratorMode == MigratorMode.IMPORT_TRANSFERS) {
+            // No app list, no MigratorActionScreen: this screen lists the exports
+            // this phone holds, which is a different kind of thing entirely.
+            TransferImportScreen(
+                viewModel = viewModel,
+                onBrowseFiles = {
+                    // StartActivityForResult rather than the OpenDocument
+                    // contract, because the contract's own launch() takes only a
+                    // MIME array and there is no way to attach the starting
+                    // folder through it.
+                    try {
+                        browseTransfer.launch(browseTransferIntent())
+                    } catch (_: ActivityNotFoundException) {
+                        // No documents provider at all. Honest failure, and the
+                        // page's list is still sitting right there.
+                        context.safeToast("No file manager available to pick a file with.")
+                    }
+                }
+            )
         } else {
             MigratorActionScreen(liveAppState, appList, viewModel, labelMap, labelNames)
         }
@@ -230,6 +268,79 @@ fun MigratorTab(
 
 /** The Folders dialog row label carries a count — match both forms. */
 private fun isFolderLabel(label: String): Boolean = label == "Folders" || label.startsWith("Folders (")
+
+/**
+ * The picker intent for an export that is somewhere OTHER than this phone's
+ * export folder.
+ *
+ * That distinction is the whole point: the Import page lists what this phone
+ * already holds, and this is the escape hatch for a file that arrived by being
+ * copied over from a PC or a cloud drive.
+ *
+ * The MIME list is close to decoration, and it is worth being clear-eyed about
+ * why. Nothing registers a MIME type for `.dvbackup.tar` — it is this app's own
+ * extension, and Android's SAF table has never heard of it — so a picker filtered
+ * to `application/gzip` would show nothing at all. The old chip passed the
+ * accept-everything wildcard, which is why it listed every file on the device.
+ * Neither extreme works; what actually helps is the starting folder below.
+ *
+ * `EXTRA_INITIAL_URI` is a **hint**, and Android's documentation is explicit that
+ * it is where the picker should be *displayed* when it loads. It is not a
+ * restriction, it cannot be, and a ROM is free to ignore it. So this degrades to
+ * the previous behaviour — an unfocused listing — rather than to nothing, and it
+ * must never be the only way in. That is exactly why the page exists first.
+ */
+private fun browseTransferIntent(): Intent {
+    // `*/*`, deliberately, and the reason is worth recording because it reads
+    // like laziness.
+    //
+    // Nothing registers a MIME type for `.dvbackup.tar` — it is this app's own
+    // extension and Android's SAF table has never heard of it. Filtering the
+    // picker to `application/gzip` therefore shows NOTHING, which was measured
+    // on the reference device: the picker opened at the right folder
+    // (`Downloads > DroidVault > DV-20261014-1829`, so EXTRA_INITIAL_URI works
+    // even on HyperOS) and rendered an empty list underneath it. Right place,
+    // no files — strictly worse than no filter at all.
+    //
+    // So the starting folder is what makes this listing usable, and the filter
+    // can only subtract. `*/*` keeps the old chip's behaviour and fixes only the
+    // part that was actually broken: where it opens.
+    val types = arrayOf(
+        "application/gzip",
+        "application/x-gzip",
+        "application/x-tar",
+        "application/tar",
+        "application/octet-stream",
+        "*/*"
+    )
+    // `primary:Download/DroidVault` is the ExternalStorageProvider's own id
+    // scheme. Built here rather than resolved from the filesystem so that no
+    // permission is needed just to name the folder.
+    val start = DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents",
+        "primary:Download/DroidVault"
+    )
+    return Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        addCategory(Intent.CATEGORY_OPENABLE)
+        // The array the old chip used, unchanged and in the same order. Every
+        // "improvement" tried here made the listing WORSE, which is worth stating
+        // because the reasoning sounds right before it is measured:
+        //
+        //  - narrow to `application/gzip`: nothing matches a `.dvbackup.tar`,
+        //    because no MIME type is registered for it. Empty list, measured.
+        //  - `["*/*"]` alone: DocumentsUI hides directories, so the picker opened
+        //    at Download/DroidVault and showed nothing you could enter.
+        //  - `type = "*/*"` with no extra: opened at Downloads, empty.
+        //
+        // The trailing wildcard is what makes it a normal browsable listing; it
+        // is not the bug. The bug was never the MIME list — it was that the
+        // picker opened at storage root. So the array stays and only the starting
+        // folder changes.
+        type = "*/*"
+        putExtra(Intent.EXTRA_MIME_TYPES, types)
+        putExtra(DocumentsContract.EXTRA_INITIAL_URI, start)
+    }
+}
 
 @Composable
 fun MigratorMenu(viewModel: MainViewModel) {
@@ -609,7 +720,6 @@ fun MigratorMenu(viewModel: MainViewModel) {
                                 if (isBackup) "Nothing to save yet"
                                 else "Nothing to restore from",
                                 style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold
                             )
                             Text(
                                 if (isBackup)
@@ -765,6 +875,16 @@ fun MigratorMenu(viewModel: MainViewModel) {
                 "See, verify and delete your backups",
                 DvRole.Storage
             ) { viewModel.setMigratorMode(MigratorMode.MANAGE) }
+            MenuCard(
+                // Import was a collapsed icon chip inside a scrollable row, which
+                // is most of why it was hard to find: it led somewhere, and every
+                // signal it sent said "a small action of no consequence". A card
+                // is the honest shape for a page.
+                "Import a backup",
+                Icons.Default.CloudUpload,
+                "Pick an export on this phone to restore",
+                DvRole.Migrate
+            ) { viewModel.setMigratorMode(MigratorMode.IMPORT_TRANSFERS) }
             Spacer(modifier = Modifier.height(100.dp))
         }
     }
@@ -793,6 +913,26 @@ fun MigratorActionScreen(
     // inside a forEach body, creating a fresh subscription per row on every
     // recomposition.
     val archivedFolders by viewModel.archivedFolders.collectAsStateWithLifecycle()
+
+    // The exports this phone holds, for the Manage Backups card. Same source the
+    // Import page reads; re-read when Manage is entered (refreshCurrentList).
+    val transferCandidates by viewModel.transferCandidates.collectAsStateWithLifecycle()
+    val transfersScanning by viewModel.transfersScanning.collectAsStateWithLifecycle()
+
+    // Device archives, and the one report that can say whether their bytes still
+    // read back. The report is passed WHOLE rather than a pre-computed health
+    // word: "not checked" has to be derived from the absence of a finding, or a
+    // screen can drift into inventing a pass (invariant 41).
+    //
+    // The READ is passed whole too, for the same kind of reason. It was a
+    // `List<DeviceArchiveInfo>` and a failed read became an empty list, which
+    // rendered as "0 of 7 backed up" — the app stating as fact that a user has
+    // no device backups because it could not open the folder (invariant 16).
+    val deviceRead by viewModel.deviceArchives.collectAsStateWithLifecycle()
+    val deviceVerification by viewModel.verification.collectAsStateWithLifecycle()
+    val deviceRows = remember(deviceRead, deviceVerification) {
+        deviceArchiveRows(deviceRead.archivesOrEmpty(), deviceVerification)
+    }
 
     val smsLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
@@ -879,18 +1019,10 @@ fun MigratorActionScreen(
         }
     }
 
-    var expandedChipLabel by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-    var timerJob by remember { mutableStateOf<Job?>(null) }
-
-    fun expandChip(label: String) {
-        expandedChipLabel = label
-        timerJob?.cancel()
-        timerJob = scope.launch {
-            delay(3000.milliseconds)
-            expandedChipLabel = null
-        }
-    }
+    // The three-second label reveal is gone with the horizontal scroller it
+    // existed to serve: a chip that is always named has nothing to reveal, and
+    // a name that came back on its own was a name you had to have tapped the
+    // right circle to read.
 
     var showComponentHelp by remember { mutableStateOf(false) }
     var showTrash by remember { mutableStateOf(false) }
@@ -905,7 +1037,7 @@ fun MigratorActionScreen(
     // an "Open with / Unable to preview file" sheet instead of returning the
     // file — the transfer could not be selected at all. Naming gzip/x-gzip/x-tar
     // says what we want to READ rather than what someone might want to launch.
-    val pickTransfer = rememberLauncherForActivityResult(
+     val pickTransfer = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -914,6 +1046,7 @@ fun MigratorActionScreen(
         // existed — so a real multi-gigabyte archive froze the UI silently.
         viewModel.importVaultFromUri(context, uri)
     }
+
     val pendingConfigs by viewModel.pendingConfigs.collectAsStateWithLifecycle()
     val isImporting by viewModel.isImporting.collectAsStateWithLifecycle()
     val isExporting by viewModel.isExporting.collectAsStateWithLifecycle()
@@ -971,51 +1104,41 @@ fun MigratorActionScreen(
     // choice persists: it describes the user's PC and cables, which do not
     // change between exports.
     var showExportDialog by remember { mutableStateOf(false) }
+    // Observed, NOT read with `.value`. Both probes run off-IO when the sheet
+    // opens, so a one-shot snapshot is always the pre-probe value: the space row
+    // was simply absent from the export sheet, silently, which is a diagnostic
+    // that disappears rather than a wrong one. `collectAsState` is the whole
+    // difference between a sheet that has the figure and one that quietly does
+    // not — and a missing row reads as "nothing to report", which is the one
+    // thing a confirmation must not do (§2.79).
+    val exportOverview by viewModel.overview.collectAsState()
+    val exportFreeKb by viewModel.exportFreeKb.collectAsState()
+    val exportVaultKb = exportOverview?.vaultKb
+
+    // Measured as the sheet opens, not at startup: free space in Downloads is
+    // the one figure on it that goes stale, and it is on a DIFFERENT filesystem
+    // from the vault, so the overview card's number cannot stand in for it.
+    LaunchedEffect(showExportDialog) {
+        if (showExportDialog) {
+            viewModel.refreshExportFreeSpace()
+            viewModel.refreshOverview()
+        }
+    }
     if (showExportDialog) {
-        var choice by remember { mutableIntStateOf(viewModel.splitChoice) }
-        AlertDialog(
-            shape = MaterialTheme.shapes.large,
-            onDismissRequest = { showExportDialog = false },
-            title = { Text("Export backups") },
-            text = {
-                Column {
-                    Text(
-                        "One big file, or smaller parts that are easier to move " +
-                            "to a PC. Parts import the same way — pick any one " +
-                            "of them.",
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    viewModel.splitOptions.forEachIndexed { i, (label, _) ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { choice = i }
-                                .padding(vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(selected = choice == i, onClick = { choice = i })
-                            Spacer(Modifier.width(8.dp))
-                            Text(label, style = MaterialTheme.typography.bodyLarge)
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                Button(onClick = {
-                    viewModel.splitChoice = choice
-                    showExportDialog = false
-                    viewModel.exportVaultForTransfer(
-                        context, viewModel.splitOptions[choice].second
-                    )
-                }) {
-                    Text("Export")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showExportDialog = false }) {
-                    Text("Cancel")
-                }
+        ExportConfirmSheet(
+            vaultPath = viewModel.savedPath.value,
+            batchDir = viewModel.nextExportDir(),
+            vaultKb = exportVaultKb,
+            freeKb = exportFreeKb,
+            splitOptions = viewModel.splitOptions,
+            initialChoice = viewModel.splitChoice,
+            onDismiss = { showExportDialog = false },
+            onConfirm = { choice ->
+                viewModel.splitChoice = choice
+                showExportDialog = false
+                viewModel.exportVaultForTransfer(
+                    context, viewModel.splitOptions[choice].second
+                )
             }
         )
     }
@@ -1293,7 +1416,6 @@ fun MigratorActionScreen(
             }
 
             val showEraseDevice = appState.migratorMode == MigratorMode.MANAGE
-            val hasButtons = showActionChip || showEraseDevice
 
             val hasComponents =
                 appState.migratorMode == MigratorMode.BACKUP_APPS || appState.migratorMode == MigratorMode.RESTORE_APPS
@@ -1333,137 +1455,123 @@ fun MigratorActionScreen(
                 )
             }
 
-            LazyRow(
-                modifier = Modifier.fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+            // WRAPS, never scrolls. This was a `LazyRow`, which is how six named
+            // controls ended up as one and a half lines with "All System Apps" and
+            // "Auto Select" off the right edge and nothing to say they were there.
+            // The chips used to collapse to bare circles and reveal their name for
+            // three seconds, so a control that was out of view was also unnameable.
+            // Every chip is permanently named now and the row wraps instead:
+            // two lines on Manage, three on Debloat, nothing hidden.
+            //
+            // `FlowChipGroup` in ConfigUi.kt already wraps the Automation tab's
+            // device chips for the same reason, so this is one pattern rather than
+            // two — and the `item { }` wrappers below became plain children.
+            // WRAPS, never scrolls. This was a `LazyRow`, and that is how six
+            // named controls ended up as one and a half lines with "All System
+            // Apps" and "Auto Select" past the right edge and nothing to say
+            // they were there. The chips also collapsed to bare circles and
+            // revealed their name for three seconds, so a control that was out
+            // of view was unnameable as well as unreachable.
+            //
+            // Every chip is permanently named now and the row wraps instead:
+            // two lines on Manage, three on Debloat, nothing hidden. The label
+            // filter directly above already wraps here, and `FlowChipGroup` in
+            // ConfigUi.kt wraps the Automation tab's device chips for the same
+            // reason — this is the third instance of one pattern, not a new one.
+            FlowRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 if (showEraseDevice) {
-                    item {
-                        // Verify reads every archive back. Without it a corrupt
-                        // archive is discovered at restore time, which is the one
-                        // moment it is least useful.
-                        AnimatedFilterChip(
-                            selected = isVerifying,
-                            onClick = {
-                                // This screen composes the dialog, so this screen
-                                // opens it. The check itself must not: a check
-                                // started elsewhere popped the dialog here unasked
-                                // (found on device, 2026-10-13).
-                                viewModel.showVerificationDialog()
-                                viewModel.verifyVault(deviceData = true)
-                            },
-                            label = if (isVerifying) "Verifying…" else "Verify backups",
-                            leadingIcon = Icons.Default.VerifiedUser,
-                            showLabel = expandedChipLabel == "Verify backups",
-                            onExpand = { expandChip("Verify backups") },
-                            collapsible = false,
-                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
-                            selectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    }
-                    item {
-                        AnimatedFilterChip(
-                            // Was hard-coded false, so the chip never lit up and a
-                            // tap left no trace anywhere. Bind it to the run state so
-                            // an in-flight operation is visible on the control the
-                            // user just pressed.
-                            selected = appState.isRunning,
-                            onClick = { showDeviceDeleteDialog = true },
-                            label = "Erase Native",
-                            leadingIcon = Icons.Default.SettingsPhone,
-                            showLabel = expandedChipLabel == "Erase Native",
-                            onExpand = { expandChip("Erase Native") },
-                            selectedContainerColor = MaterialTheme.colorScheme.errorContainer,
-                            selectedContentColor = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                    }
+                    // Verify reads every archive back. Without it a corrupt
+                    // archive is discovered at restore time, which is the one
+                    // moment it is least useful.
+                    AnimatedFilterChip(
+                        selected = isVerifying,
+                        onClick = {
+                            // This screen composes the dialog, so this screen
+                            // opens it. The check itself must not: a check
+                            // started elsewhere popped the dialog here unasked
+                            // (found on device, 2026-10-13).
+                            viewModel.showVerificationDialog()
+                            viewModel.verifyVault(deviceData = true)
+                        },
+                        label = if (isVerifying) "Verifying…" else "Verify backups",
+                        leadingIcon = Icons.Default.VerifiedUser,
+                        selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        selectedContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    AnimatedFilterChip(
+                        // Was hard-coded false, so the chip never lit up and a
+                        // tap left no trace anywhere. Bind it to the run state so
+                        // an in-flight operation is visible on the control the
+                        // user just pressed.
+                        selected = appState.isRunning,
+                        onClick = { showDeviceDeleteDialog = true },
+                        label = "Erase Native",
+                        // Was SettingsPhone, which is a phone with a cog on it —
+                        // it reads as "phone settings", and this chip erases the
+                        // device archives. `CleaningServices` is a cleanup sweep
+                        // and is distinct from the `DeleteSweep` broom that means
+                        // debloat, which is a different destructive thing.
+                        leadingIcon = Icons.Default.CleaningServices,
+                        selectedContainerColor = MaterialTheme.colorScheme.errorContainer,
+                        selectedContentColor = MaterialTheme.colorScheme.onErrorContainer
+                    )
                 }
 
                 if (appState.migratorMode == MigratorMode.MANAGE) {
-                    // Cross-device transfer. Export is one tap (it writes a single
-                    // file into Downloads the user then moves); import needs a
-                    // picker because the file is wherever the user put it.
-                    item {
-                        AnimatedFilterChip(
-                            // Export can take minutes. Showing it as "working" is
-                            // the only feedback the user gets while it runs.
-                            selected = appState.isRunning,
-                            onClick = { showExportDialog = true },
-                            label = "Export",
-                            leadingIcon = Icons.Default.IosShare,
-                            showLabel = expandedChipLabel == "Export",
-                            onExpand = { expandChip("Export") },
-                            collapsible = false
-                        )
-                    }
-                    item {
-                        AnimatedFilterChip(
-                            selected = false,
-                            onClick = {
-                                pickTransfer.launch(
-                                    arrayOf(
-                                        "application/gzip",
-                                        "application/x-gzip",
-                                        "application/x-tar",
-                                        "application/tar",
-                                        "application/octet-stream",
-                                        "*/*"
-                                    )
-                                )
-                            },
-                            label = "Import",
-                            leadingIcon = Icons.Default.Download,
-                            showLabel = expandedChipLabel == "Import",
-                            onExpand = { expandChip("Import") },
-                            collapsible = false
-                        )
-                    }
+                    // Cross-device transfer. Export is one tap — it writes a
+                    // single file into Downloads that the user then moves.
+                    //
+                    // Import used to sit here too, as a collapsed icon chip that
+                    // launched the system picker with `*/*`. It is a PAGE now
+                    // (MigratorMode.IMPORT_TRANSFERS, and a card on the Migrate
+                    // menu), because it lists the exports this phone already
+                    // holds and picking a stray `.part-aa` from a `*/*` listing
+                    // is not a thing anyone should have to work out. The picker
+                    // still exists, reachable from that page as "Find it
+                    // somewhere else…".
+                    AnimatedFilterChip(
+                        // Export can take minutes. Showing it as "working" is
+                        // the only feedback the user gets while it runs.
+                        selected = appState.isRunning,
+                        onClick = { showExportDialog = true },
+                        label = "Export",
+                        leadingIcon = Icons.Default.IosShare
+                    )
                 }
+
                 if (showActionChip) {
                     if (appState.migratorMode == MigratorMode.DEBLOAT) {
-                        item {
-                            AnimatedFilterChip(
-                                selected = appState.actionFilterState == 1,
-                                onClick = { viewModel.setActionFilter(1) },
-                                label = "Debloat",
-                                leadingIcon = Icons.Default.Delete,
-                                showLabel = expandedChipLabel == "Debloat",
-                                onExpand = { expandChip("Debloat") }
-                            )
-                        }
-                        item {
-                            AnimatedFilterChip(
-                                selected = appState.actionFilterState == 2,
-                                onClick = { viewModel.setActionFilter(2) },
-                                label = "Restore",
-                                leadingIcon = Icons.Default.RestorePage,
-                                showLabel = expandedChipLabel == "Restore",
-                                onExpand = { expandChip("Restore") }
-                            )
-                        }
+                        AnimatedFilterChip(
+                            selected = appState.actionFilterState == 1,
+                            onClick = { viewModel.setActionFilter(1) },
+                            label = "Debloat",
+                            leadingIcon = Icons.Default.Delete
+                        )
+                        AnimatedFilterChip(
+                            selected = appState.actionFilterState == 2,
+                            onClick = { viewModel.setActionFilter(2) },
+                            label = "Restore",
+                            leadingIcon = Icons.Default.RestorePage
+                        )
                     } else if (appState.migratorMode == MigratorMode.SYSTEMIZE) {
-                        item {
-                            AnimatedFilterChip(
-                                selected = appState.actionFilterState == 1,
-                                onClick = { viewModel.setActionFilter(1) },
-                                label = "Systemize",
-                                leadingIcon = Icons.Default.Settings,
-                                showLabel = expandedChipLabel == "Systemize",
-                                onExpand = { expandChip("Systemize") }
-                            )
-                        }
-                        item {
-                            AnimatedFilterChip(
-                                selected = appState.actionFilterState == 2,
-                                onClick = { viewModel.setActionFilter(2) },
-                                label = "De-Systemize",
-                                leadingIcon = Icons.Default.Build,
-                                showLabel = expandedChipLabel == "De-Systemize",
-                                onExpand = { expandChip("De-Systemize") }
-                            )
-                        }
+                        AnimatedFilterChip(
+                            selected = appState.actionFilterState == 1,
+                            onClick = { viewModel.setActionFilter(1) },
+                            label = "Systemize",
+                            leadingIcon = Icons.Default.Settings
+                        )
+                        AnimatedFilterChip(
+                            selected = appState.actionFilterState == 2,
+                            onClick = { viewModel.setActionFilter(2) },
+                            label = "De-Systemize",
+                            leadingIcon = Icons.Default.Build
+                        )
                     }
                 }
 
@@ -1473,111 +1581,83 @@ fun MigratorActionScreen(
                 // meant the last three were only reachable by swiping a row
                 // that gave no hint there was more.
 
-                if (hasButtons && (showSmartSelect || showAppFilters)) {
-                    item {
-                        Box(
-                            modifier = Modifier
-                                .padding(horizontal = 4.dp)
-                                .width(1.dp)
-                                .height(24.dp)
-                                .background(MaterialTheme.colorScheme.outlineVariant)
-                        )
-                    }
-                }
+                // The vertical rule that used to sit between the two chip groups
+                // is gone. It divided "actions" from "selection helpers" in a row
+                // that scrolled, and in a row that WRAPS it is just another child
+                // that happens to land wherever the line breaks — on the reference
+                // phone it rendered as a stray bar at the end of the first line,
+                // next to nothing. The two groups read as distinct by position now.
 
                 if (showSmartSelect) {
                     // Only where parts exist to be compared. Debloat/Systemize
                     // act on whole packages, so "changed" is meaningless there.
                     if (hasComponents) {
-                        item {
-                            val changedCount = remember(appList, appState.globalComponents) {
-                                appList.count {
-                                    !ChangeDetection.isUpToDate(it, appState.globalComponents)
-                                }
+                        val changedCount = remember(appList, appState.globalComponents) {
+                            appList.count {
+                                !ChangeDetection.isUpToDate(it, appState.globalComponents)
                             }
-                            AnimatedFilterChip(
-                                selected = false,
-                                onClick = { viewModel.selectChangedApps(filteredApps) },
-                                label = if (changedCount == 0) "All up to date" else "Changed only",
-                                leadingIcon = Icons.Default.Update,
-                                showLabel = expandedChipLabel == "Changed only",
-                                onExpand = { expandChip("Changed only") },
-                                collapsible = false,
-                                enabled = changedCount > 0
-                            )
                         }
-                    }
-                    item {
-                        val allSmartMatchesSelected = remember(
-                            filteredApps,
-                            appState.migratorMode,
-                            appState.actionFilterState
-                        ) {
-                            val matches = filteredApps.filter { app ->
-                                when (appState.migratorMode) {
-                                    MigratorMode.BACKUP_APPS -> app.availableInBackup.isNotEmpty()
-                                    MigratorMode.RESTORE_APPS -> !app.isInstalled
-                                    MigratorMode.MANAGE -> app.isInstalled
-                                    MigratorMode.DEBLOAT -> appState.actionFilterState == 1 && app.availableInBackup.contains(
-                                        1
-                                    )
-                                    else -> false
-                                }
-                            }
-                            matches.isNotEmpty() && matches.all { it.isSelected }
-                        }
-
                         AnimatedFilterChip(
-                            selected = allSmartMatchesSelected,
-                            onClick = {
-                                viewModel.smartSelect(filteredApps)
-                            },
-                            label = "Auto Select",
-                            leadingIcon = Icons.Default.AutoAwesome,
-                            showLabel = expandedChipLabel == "Auto Select",
-                            onExpand = { expandChip("Auto Select") },
-                            collapsible = false
+                            selected = false,
+                            onClick = { viewModel.selectChangedApps(filteredApps) },
+                            label = if (changedCount == 0) "All up to date" else "Changed only",
+                            leadingIcon = Icons.Default.Update,
+                            enabled = changedCount > 0
                         )
                     }
-
-                    if (appState.migratorMode == MigratorMode.DEBLOAT && appState.actionFilterState == 1) {
-                        item {
-                            AnimatedFilterChip(
-                                selected = appState.keepDebloatData,
-                                onClick = { viewModel.toggleKeepDebloatData() },
-                                label = "Keep Data",
-                                leadingIcon = Icons.Default.Storage,
-                                showLabel = expandedChipLabel == "Keep Data",
-                                onExpand = { expandChip("Keep Data") }
-                            )
+                    val allSmartMatchesSelected = remember(
+                        filteredApps,
+                        appState.migratorMode,
+                        appState.actionFilterState
+                    ) {
+                        val matches = filteredApps.filter { app ->
+                            when (appState.migratorMode) {
+                                MigratorMode.BACKUP_APPS -> app.availableInBackup.isNotEmpty()
+                                MigratorMode.RESTORE_APPS -> !app.isInstalled
+                                MigratorMode.MANAGE -> app.isInstalled
+                                MigratorMode.DEBLOAT -> appState.actionFilterState == 1 &&
+                                        app.availableInBackup.contains(1)
+                                else -> false
+                            }
                         }
+                        matches.isNotEmpty() && matches.all { it.isSelected }
+                    }
+
+                    AnimatedFilterChip(
+                        selected = allSmartMatchesSelected,
+                        onClick = { viewModel.smartSelect(filteredApps) },
+                        label = "Auto Select",
+                        leadingIcon = Icons.Default.AutoAwesome
+                    )
+
+                    if (appState.migratorMode == MigratorMode.DEBLOAT &&
+                        appState.actionFilterState == 1
+                    ) {
+                        AnimatedFilterChip(
+                            selected = appState.keepDebloatData,
+                            onClick = { viewModel.toggleKeepDebloatData() },
+                            label = "Keep Data",
+                            leadingIcon = Icons.Default.Storage
+                        )
                     }
                 }
 
                 if (showAppFilters) {
                     if (showPartialSystemFilter) {
-                        item {
-                            AnimatedFilterChip(
-                                selected = appState.showPartialSystemApps,
-                                onClick = { viewModel.togglePartialSystemApps() },
-                                label = "System Apps",
-                                leadingIcon = Icons.Default.Layers,
-                                showLabel = expandedChipLabel == "System Apps",
-                                onExpand = { expandChip("System Apps") }
-                            )
-                        }
-                    }
-
-                    item {
                         AnimatedFilterChip(
-                            selected = appState.showSystemApps,
-                            onClick = { viewModel.toggleSystemApps() },
-                            label = "All System Apps",
-                            leadingIcon = Icons.Default.Settings,
-                            showLabel = expandedChipLabel == "All System Apps",
-                            onExpand = { expandChip("All System Apps") }
+                            selected = appState.showPartialSystemApps,
+                            onClick = { viewModel.togglePartialSystemApps() },
+                            label = "System Apps",
+                            leadingIcon = Icons.Default.Layers
                         )
                     }
+
+                    AnimatedFilterChip(
+                        selected = appState.showSystemApps,
+                        onClick = { viewModel.toggleSystemApps() },
+                        label = "All System Apps",
+                        leadingIcon = Icons.Default.Settings
+                    )
                 }
             }
         }
@@ -1624,7 +1704,6 @@ fun MigratorActionScreen(
                         "$summary — tap an app to change what it includes",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Bold
                     )
                 }
             }
@@ -1731,7 +1810,6 @@ fun MigratorActionScreen(
                                     Text(
                                         "Backed-up Folders",
                                         style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold
                                     )
                                     Text(
                                         "${folderArchive.folders.size} folder${if (folderArchive.folders.size == 1) "" else "s"} in " +
@@ -1842,7 +1920,6 @@ fun MigratorActionScreen(
                                             }
                                         },
                                         enabled = archivedSelection.isNotEmpty(),
-                                        modifier = Modifier.size(40.dp)
                                     ) {
                                         Icon(
                                             Icons.Default.DeleteForever,
@@ -1858,6 +1935,32 @@ fun MigratorActionScreen(
                     }
                 }
             }
+        }
+        // Transfer files — the exports made for moving a vault to another phone.
+        //
+        // Here rather than only on the Import page because the reason to remove
+        // one is space, and this is the screen that answers "what is on this
+        // phone". Seventeen 2 GB pieces is a quarter of the device; a user
+        // hunting for room looks in Manage Backups, not behind Import.
+        //
+        // Scoped to MANAGE for the same reason the folder archive is: the other
+        // modes list apps to act on, and a storage-management card above those
+        // lists is noise on a screen whose primary action is in the footer.
+        if (appState.migratorMode == MigratorMode.MANAGE) {
+            // What device data is in this backup. Above the Exports card
+            // because it is the half of the vault that has no other home on this
+            // screen: the app list below is apps, and the exports are copies for
+            // moving elsewhere, while these are the archives a restore reads.
+            DeviceDataCard(
+                read = deviceRead,
+                rows = deviceRows,
+                onDelete = { viewModel.deleteDeviceBackup(context, it) }
+            )
+            ExportsCard(
+                candidates = transferCandidates,
+                scanning = transfersScanning,
+                onDelete = { viewModel.deleteTransfer(context, it) }
+            )
         }
         PullToRefreshBox(
             isRefreshing = appState.isFetchingApps,
@@ -1898,11 +2001,17 @@ fun MigratorActionScreen(
                     verticalArrangement = Arrangement.Center,
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    // The tint was `onSurfaceVariant` — a neutral that means
+                    // nothing about WHICH kind of nothing this is, on the most
+                    // visited empty state in the app. The icons stay flat and 40dp
+                    // on purpose: this block is centred in a full-height list, and
+                    // `DvEmptyState`'s 96dp circle belongs under a header, not
+                    // here. Only the colour is wrong.
                     Icon(
                         if (nothingBackedUp) Icons.Default.CloudOff else Icons.Default.SearchOff,
                         contentDescription = null,
-                        modifier = Modifier.size(40.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = if (appState.migratorMode == MigratorMode.RESTORE_APPS)
+                            dvAccent(DvRole.Restore) else dvAccent(DvRole.Backup)
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
@@ -1976,7 +2085,6 @@ fun MigratorActionScreen(
                                         appLabels.joinToString(" • "),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.Bold,
                                         maxLines = 1,
                                         modifier = Modifier.padding(start = 90.dp, end = 12.dp)
                                     )
@@ -2003,7 +2111,7 @@ fun MigratorActionScreen(
             AnimatedContent(
                 targetState = showProgressPanel,
                 transitionSpec = {
-                    fadeIn(tween(200)) togetherWith fadeOut(tween(200))
+                    fadeIn(DvMotion.settle()) togetherWith fadeOut(DvMotion.settle())
                 },
                 label = "BottomBarTransition"
             ) { isProcessing ->
@@ -2031,6 +2139,18 @@ fun MigratorActionScreen(
                                 a.contains("Partially completed", ignoreCase = true)
                             )
                     }
+                    // ...but only once the run has SETTLED. The allow-list above
+                    // describes terminal strings, so during the run itself every
+                    // action failed it and the whole panel rendered in error red
+                    // — "Exporting..." and "Importing..." in the colour reserved
+                    // for failure, for the entire length of the work. Found while
+                    // giving that line the phase name, which would have sat in
+                    // red for twenty minutes rather than one word.
+                    //
+                    // Guarded on isRunning rather than on the 100% check: a run
+                    // that failed at 40% is settled too, and its verdict must
+                    // still be red.
+                    val showError = isError && !progressState.isRunning
 
                     val processingApp = remember(progressState.currentAction, progressState.currentStep) {
                         appList.firstOrNull { app ->
@@ -2073,10 +2193,10 @@ fun MigratorActionScreen(
                             AnimatedContent(
                                 targetState = isCompleted,
                                 transitionSpec = {
-                                    (scaleIn(tween(400, easing = FastOutSlowInEasing)) + fadeIn(
-                                        tween(400)
+                                    (scaleIn(DvMotion.settle(DvMotion.emphasised)) + fadeIn(
+                                        DvMotion.settle(DvMotion.emphasised)
                                     )) togetherWith
-                                            (scaleOut(tween(200)) + fadeOut(tween(200)))
+                                            (scaleOut(DvMotion.settle()) + fadeOut(DvMotion.settle()))
                                 },
                                 label = "IconTransition"
                             ) { completed ->
@@ -2084,9 +2204,9 @@ fun MigratorActionScreen(
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     if (completed) {
                                         Icon(
-                                            imageVector = if (isError) Icons.Default.Error else Icons.Default.Verified,
-                                            contentDescription = if (isError) "Error" else "Success",
-                                            tint = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                                            imageVector = if (showError) Icons.Default.Error else Icons.Default.Verified,
+                                            contentDescription = if (showError) "Error" else "Success",
+                                            tint = if (showError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                                             modifier = Modifier.size(42.dp)
                                         )
                                         Spacer(modifier = Modifier.width(16.dp))
@@ -2130,7 +2250,7 @@ fun MigratorActionScreen(
                                 Text(
                                     text = progressState.currentAction,
                                     style = MaterialTheme.typography.titleMedium,
-                                    color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                                    color = if (showError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -2150,7 +2270,6 @@ fun MigratorActionScreen(
                                 Spacer(modifier = Modifier.width(12.dp))
                                 FilledTonalIconButton(
                                     onClick = { viewModel.clearLogs() },
-                                    modifier = Modifier.size(40.dp),
                                     shape = CircleShape
                                 ) {
                                     Icon(
@@ -2179,7 +2298,7 @@ fun MigratorActionScreen(
                                     .fillMaxWidth()
                                     .height(6.dp)
                                     .clip(CircleShape),
-                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                                color = if (showError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                                 trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
                             )
                         } else {
@@ -2188,7 +2307,7 @@ fun MigratorActionScreen(
                                     .fillMaxWidth()
                                     .height(6.dp)
                                     .clip(CircleShape),
-                                color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                                color = if (showError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                                 trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
                             )
                         }

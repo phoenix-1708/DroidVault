@@ -85,6 +85,7 @@ import com.phoenix.droidvault.models.PartState
 import com.phoenix.droidvault.models.ProgressState
 import com.phoenix.droidvault.models.RunPhase
 import coil.compose.AsyncImage
+import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.utils.AutomationRunner
 import com.phoenix.droidvault.utils.ProgressTracker
 
@@ -142,7 +143,7 @@ fun ProcessingScreen(
             }
             AnimatedContent(
                 targetState = headerTitle,
-                transitionSpec = { fadeIn(tween(250)) togetherWith fadeOut(tween(250)) },
+                transitionSpec = { fadeIn(DvMotion.settle()) togetherWith fadeOut(DvMotion.settle()) },
                 label = "title",
                 modifier = Modifier.weight(1f),
             ) { title ->
@@ -167,7 +168,7 @@ fun ProcessingScreen(
                 .height(4.dp)
         ) {
             if (topPct != null) {
-                val animated by animateFloatAsState(topPct, tween(400), label = "topbar")
+                val animated by animateFloatAsState(topPct, DvMotion.settle(DvMotion.emphasised), label = "topbar")
                 LinearProgressIndicator(
                     progress = { animated },
                     modifier = Modifier.fillMaxSize(),
@@ -467,7 +468,7 @@ private fun SuccessBadge(container: Color, checkColor: Color) {
     val scale by infinite.animateFloat(
         initialValue = 0.92f,
         targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        animationSpec = infiniteRepeatable(DvMotion.breathe(), RepeatMode.Reverse),
         label = "popScale",
     )
     Box(
@@ -555,8 +556,8 @@ private fun HeroSection(
         AnimatedContent(
             targetState = app?.label ?: if (phase == RunPhase.FINALIZING) "Wrapping up" else "Preparing",
             transitionSpec = {
-                (fadeIn(tween(250)) + scaleIn(initialScale = 0.94f, animationSpec = tween(250))) togetherWith
-                        (fadeOut(tween(150)) + scaleOut(targetScale = 0.98f, animationSpec = tween(150)))
+                (fadeIn(DvMotion.settle()) + scaleIn(initialScale = 0.94f, animationSpec = DvMotion.settle())) togetherWith
+                        (fadeOut(DvMotion.settle(DvMotion.quick)) + scaleOut(targetScale = 0.98f, animationSpec = DvMotion.settle(DvMotion.quick)))
             },
             label = "heroLabel",
         ) { label ->
@@ -800,7 +801,7 @@ private fun AppProgressCard(
                 if (highlighted) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
                 else Color.Transparent
             )
-            .animateContentSize(tween(220))
+            .animateContentSize(DvMotion.settle())
             .clickable(enabled = clickable, onClick = onToggle)
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
@@ -936,7 +937,7 @@ private fun SummaryIcon(state: PartState, tint: Color) {
             val trans = rememberInfiniteTransition(label = "spin")
             val angle by trans.animateFloat(
                 0f, 360f,
-                infiniteRepeatable(tween(900, easing = LinearEasing)),
+                infiniteRepeatable(DvMotion.breathe()),
                 label = "angle",
             )
             Canvas(Modifier.size(16.dp)) {

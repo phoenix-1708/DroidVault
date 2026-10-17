@@ -29,6 +29,16 @@ class TrashLabelTest {
     }
 
     @Test
+    fun `exports agree in number`() {
+        // The sentence a user reads after deleting an export — possibly the only
+        // copy of an old phone's vault. "1 exports" was the fallback's answer,
+        // and this is the one batch label where the singular is the normal case:
+        // a split export moves as one folder, whatever its piece count.
+        assertEquals("1 export", Trash.batchLabel(1, "exports"))
+        assertEquals("2 exports", Trash.batchLabel(2, "exports"))
+    }
+
+    @Test
     fun `zero is plural`() {
         // "0 device backup" reads as a missing item rather than an empty count.
         assertEquals("0 device backups", Trash.batchLabel(0, "device backups"))

@@ -115,13 +115,44 @@ object BackendInstaller {
             // exist and be non-empty. This is invariant 22 — a verdict from the
             // result, not from the plan — applied to the one gate everything else
             // depends on.
-            val landed = listOf(launcherFile, engineFile, zapdosFile).all {
-                val f = File(it.absolutePath)
-                f.exists() && f.length() > 0L
+            //
+            // Read them through the SHELL, not through `File`. `/data/adb` is
+            // `drwx------ root:root`, so the app's own uid cannot traverse it
+            // and `File.exists()` there is FALSE for a file that plainly exists
+            // — measured on the reference device, where a perfectly good
+            // 699 KB engine read as absent. The verdict was therefore always
+            // "not landed", `installed_version` was never written, and every
+            // caller that gates on this refused to run an engine operation.
+            //
+            // It is invisible on a phone that has already installed successfully
+            // once, because the gate short-circuits on `installed_version` and
+            // never re-deploys — so it bites exactly the clean-install-after-a-
+            // flash case this app exists for, and only the first time.
+            //
+            // The shell is root and already ran these very commands, so it is the
+            // one lens that can see what landed.
+            val landedSizes = Shell.cmd(
+                "stat -c '%s' " +
+                    listOf(launcherFile, engineFile, zapdosFile)
+                        .joinToString(" ") { ShellQuote.q(it.absolutePath) } +
+                    " 2>/dev/null"
+            ).exec().out.mapNotNull { it.trim().toLongOrNull() }
+
+            val landed = landedSizes.size == 3 && landedSizes.all { it > 0L }
+            val missing = if (landed) {
+                emptyList()
+            } else {
+                // Named, not counted: a field report says which file is absent.
+                // Stat each individually so one missing file does not shift the
+                // list and blame the wrong one.
+                listOf(launcherFile, engineFile, zapdosFile)
+                    .filter { f ->
+                        Shell.cmd("stat -c '%s' ${ShellQuote.q(f.absolutePath)} 2>/dev/null")
+                            .exec().out.firstOrNull()?.trim()?.toLongOrNull()
+                            ?.let { it <= 0L } ?: true
+                    }
+                    .map { it.absolutePath }
             }
-            val missing = listOf(launcherFile, engineFile, zapdosFile)
-                .filter { !File(it.absolutePath).exists() || File(it.absolutePath).length() == 0L }
-                .map { it.absolutePath }
 
             if (result.isSuccess && landed) {
                 prefs.edit { putLong("installed_version", currentVersionCode) }

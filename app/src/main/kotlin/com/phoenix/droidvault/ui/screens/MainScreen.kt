@@ -62,7 +62,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FlashOn
 import androidx.compose.material.icons.filled.Folder
@@ -149,6 +151,7 @@ import com.phoenix.droidvault.models.FlashAction
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.ui.components.AppInstallerDialog
 import com.phoenix.droidvault.ui.components.BatchInstallerDialog
+import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.DvRole
 import com.phoenix.droidvault.ui.theme.DvShapes
 import com.phoenix.droidvault.ui.theme.dvAccent
@@ -161,6 +164,13 @@ import kotlinx.coroutines.flow.map
 
 @Composable
 fun MainScreen(viewModel: MainViewModel) {
+    // Held here because MainScreen is the only composable that sees BOTH ends of
+    // the shortcut editor: the pencil that toggles it is in AppScaffold's app
+    // bar, and the grid it rearranges is inside DashboardScreen.
+    //
+    // `rememberSaveable`, so leaving the tab and coming back does not silently
+    // drop the user into a rearranged grid they had already committed to.
+    var homeEditMode by rememberSaveable { mutableStateOf(false) }
     val appState by viewModel.shellUiState.collectAsStateWithLifecycle()
     val appList by viewModel.appList.collectAsStateWithLifecycle()
     val flashActions by viewModel.flashActions.collectAsStateWithLifecycle()
@@ -455,7 +465,7 @@ fun MainScreen(viewModel: MainViewModel) {
                     autoViewModel.requestBack()
                     isPopping = false
                 } else {
-                    backProgress.animateTo(1f, animationSpec = tween(120, easing = FastOutSlowInEasing))
+                    backProgress.animateTo(1f, animationSpec = DvMotion.settle(DvMotion.quick))
 
                     if (showAbout) showAbout = false
                     else if (showSettings) showSettings = false
@@ -476,7 +486,7 @@ fun MainScreen(viewModel: MainViewModel) {
             }
             triggerBackNavigation()
         } catch (_: CancellationException) {
-            scope.launch { backProgress.animateTo(0f, animationSpec = tween(120, easing = FastOutSlowInEasing)) }
+            scope.launch { backProgress.animateTo(0f, animationSpec = DvMotion.settle(DvMotion.quick)) }
         }
     }
 
@@ -508,12 +518,20 @@ fun MainScreen(viewModel: MainViewModel) {
                 showAbout = showAbout,
                 selectedTab = selectedTab,
                 viewModel = viewModel,
-                    onTabSelect = selectTab,
-                    onSettingsToggle = { showSettings = it },
-                    onOpenAbout = { showAbout = true },
-                    onBackClick = { triggerBackNavigation() },
-                    onDashboardShortcut = { dashboardShortcutPending = true }
-                )
+                onTabSelect = selectTab,
+                onSettingsToggle = { showSettings = it },
+                onOpenAbout = { showAbout = true },
+                onBackClick = { triggerBackNavigation() },
+                onDashboardShortcut = { dashboardShortcutPending = true },
+                // One flag for both ends of the shortcut editor. The pencil that
+                // toggles it is in AppScaffold's app bar; the grid it rearranges
+                // is inside DashboardScreen. Held HERE because that is the only
+                // composable that sees both — AppScaffold takes it as a
+                // parameter, and a parameter is what stopped a local of the same
+                // name from shadowing the real value.
+                homeEditMode = homeEditMode,
+                onToggleHomeEdit = { homeEditMode = !homeEditMode }
+            )
         }
 
         LiveProcessingOverlay()
@@ -567,8 +585,8 @@ private fun LiveProcessingOverlay() {
     if (showProcessing && phase.name != "I") {
         AnimatedVisibility(
             visible = true,
-            enter = fadeIn(tween(220)) + scaleIn(initialScale = 0.96f, animationSpec = tween(220)),
-            exit = fadeOut(tween(180)) + scaleOut(targetScale = 0.98f, animationSpec = tween(180)),
+            enter = fadeIn(DvMotion.settle()) + scaleIn(initialScale = 0.96f, animationSpec = DvMotion.settle()),
+            exit = fadeOut(DvMotion.settle()) + scaleOut(targetScale = 0.98f, animationSpec = DvMotion.settle()),
             modifier = Modifier.fillMaxSize(),
         ) {
             ProcessingScreen(
@@ -594,6 +612,11 @@ fun AppScaffold(
     onOpenAbout: () -> Unit = {},
     onBackClick: () -> Unit,
     onDashboardShortcut: () -> Unit = {},
+    // Home's shortcut edit mode. Held here rather than inside DashboardScreen
+    // because the control that toggles it is the app bar's, and a state two
+    // composables apart cannot be owned by neither.
+    homeEditMode: Boolean = false,
+    onToggleHomeEdit: () -> Unit = {},
 ) {
     val autoViewModel: AutomationViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
     // Scaffold chrome only consumes run-state-free fields of the Automation
@@ -649,6 +672,7 @@ fun AppScaffold(
                 MigratorMode.MANAGE -> "Manage Backups"
                 MigratorMode.DEBLOAT -> "Debloat / Restore Apps"
                 MigratorMode.SYSTEMIZE -> "Systemize User Apps"
+                MigratorMode.IMPORT_TRANSFERS -> "Import"
             }
         }
         // Auto submenu: the content screens carry their own headings, so the
@@ -699,7 +723,7 @@ fun AppScaffold(
             if (kotlin.math.abs(from - selectedTab) == 1) {
                 pagerState.animateScrollToPage(
                     selectedTab,
-                    animationSpec = tween(180, easing = FastOutLinearInEasing)
+                    animationSpec = DvMotion.decelerate()
                 )
             } else {
                 pagerState.scrollToPage(selectedTab)
@@ -718,7 +742,7 @@ fun AppScaffold(
             initialValue = 0.2f,
             targetValue = 1f,
             animationSpec = infiniteRepeatable(
-                animation = tween(800, easing = FastOutSlowInEasing),
+                animation = DvMotion.breathe(),
                 repeatMode = RepeatMode.Reverse
             ),
             label = "logoAlpha"
@@ -756,7 +780,6 @@ fun AppScaffold(
                             Text(
                                 text = dynamicTitle,
                                 style = MaterialTheme.typography.headlineMedium,
-                                fontWeight = FontWeight.ExtraBold,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
@@ -777,6 +800,26 @@ fun AppScaffold(
                     },
                     actions = {
                         if (isHome) {
+                            // The shortcut pencil lives HERE, not in the column.
+                            //
+                            // As a floating right-aligned icon in the page it sat in
+                            // a 48dp touch target holding one 20dp glyph, so the space
+                            // above it was the column's 20dp gap PLUS half a touch
+                            // target and the space below was another half — two voids
+                            // around one control, in the middle of the screen, where
+                            // it read as a layout hole rather than as an affordance.
+                            // The app bar is where Material puts edit actions, and the
+                            // Home bar had one control and a wide empty middle.
+                            IconButton(onClick = onToggleHomeEdit) {
+                                Icon(
+                                    if (homeEditMode) Icons.Default.Close else Icons.Default.Edit,
+                                    contentDescription = if (homeEditMode)
+                                        "Finish editing shortcuts" else "Edit shortcuts",
+                                    tint = if (homeEditMode) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurface,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
                             IconButton(
                                 onClick = { onSettingsToggle(true) },
                                 modifier = Modifier.padding(end = 8.dp)
@@ -825,13 +868,10 @@ fun AppScaffold(
                         EnterTransition.None togetherWith ExitTransition.None
                     } else if (!initialState && targetState) {
                         slideInHorizontally(
-                            tween(
-                                150,
-                                easing = FastOutSlowInEasing
-                            )
-                        ) { it } togetherWith fadeOut(tween(130))
+                            DvMotion.settle(DvMotion.quick)
+                        ) { it } togetherWith fadeOut(DvMotion.settle(DvMotion.quick))
                     } else {
-                        fadeIn(tween(160)) togetherWith fadeOut(tween(130))
+                        fadeIn(DvMotion.settle(DvMotion.quick)) togetherWith fadeOut(DvMotion.settle(DvMotion.quick))
                     }
                 },
                 label = "AppContentTransition",
@@ -857,7 +897,7 @@ fun AppScaffold(
                             } else {
                                 // Settings -> About is a forward navigation
                                 // with no gesture behind it: cross-fade.
-                                fadeIn(tween(220)) togetherWith fadeOut(tween(160))
+                                fadeIn(DvMotion.settle()) togetherWith fadeOut(DvMotion.settle(DvMotion.quick))
                             }
                         },
                         label = "SettingsSubPage",
@@ -918,6 +958,7 @@ fun AppScaffold(
                                         viewModel = viewModel,
                                         appState = appState,
                                         onOpenTab = onTabSelect,
+                                        editMode = homeEditMode,
                                         onOpenMigrator = { mode ->
                                             onDashboardShortcut()
                                             viewModel.setMigratorMode(mode)
@@ -966,8 +1007,8 @@ fun AppScaffold(
                 enter = EnterTransition.None,
                 exit = slideOutVertically(
                     targetOffsetY = { it },
-                    animationSpec = tween(400, easing = FastOutLinearInEasing)
-                ) + fadeOut(tween(400)),
+                    animationSpec = DvMotion.decelerate(DvMotion.emphasised)
+                ) + fadeOut(DvMotion.settle(DvMotion.emphasised)),
                 modifier = Modifier.align(
                     if (isExpandedWindow) Alignment.CenterStart else Alignment.BottomCenter
                 )
@@ -1078,10 +1119,7 @@ fun AppScaffold(
                                 targetValue = if (isSelected) 1.08f else 1f,
                                 // Snappy over bouncy: low-stiffness springs settle
                                 // for seconds and drop frames on big lists.
-                                animationSpec = spring(
-                                    dampingRatio = Spring.DampingRatioNoBouncy,
-                                    stiffness = Spring.StiffnessMedium
-                                ),
+                                animationSpec = DvMotion.Springs.settle(),
                                 label = "tabIconScale"
                             )
                             // BoxWithConstraints (not Column) so the label can be fitted
@@ -1092,7 +1130,29 @@ fun AppScaffold(
                                 modifier = Modifier
                                     .weight(1f)
                                     .wrapContentHeight()
-                                    .clip(CircleShape)
+                                    // NO CircleShape clip here, and that is the whole 2x nav bug.
+                                    //
+                                    // `clip` on a Box clips to a circle whose DIAMETER is
+                                    // the box's SHORTER side. This box is a full tab slot
+                                    // wide (213px on the reference phone) and about half
+                                    // that tall, so the clip is a ~150px circle, and at
+                                    // the label's vertical position the chord across it
+                                    // is roughly 90px wide. The label fitter, which
+                                    // correctly measured "Migrate" at 200px against a
+                                    // 213px slot, was reasoning about a width the pixels
+                                    // never had: at 2x font the 'e' was cut in half by
+                                    // geometry nobody had measured.
+                                    //
+                                    // The rounding that matters belongs to the pill, and
+                                    // the pill is a `Surface` carrying its own
+                                    // `clip(CircleShape)`. On this box the clip bought
+                                    // nothing - the ripple is already suppressed with
+                                    // `indication = null` - so all it ever did was crop
+                                    // glyphs.
+                                    //
+                                    // The fitter stays: a slot can still be narrower than
+                                    // its longest label, and it now measures against a
+                                    // width that is real.
                                     .clickable(
                                         interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                                         indication = null
@@ -1206,8 +1266,8 @@ fun AppScaffold(
 
             AnimatedVisibility(
                 visible = operationRunningElsewhere,
-                enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.98f, animationSpec = tween(180)),
-                exit = fadeOut(tween(120)),
+                enter = fadeIn(DvMotion.settle()) + scaleIn(initialScale = 0.98f, animationSpec = DvMotion.settle()),
+                exit = fadeOut(DvMotion.settle(DvMotion.quick)),
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(horizontal = 16.dp, vertical = 8.dp)
@@ -1268,7 +1328,7 @@ fun OnboardingWizard(viewModel: MainViewModel) {
         if (!isPopping) {
             isPopping = true
             scope.launch {
-                backProgress.animateTo(1f, animationSpec = tween(140, easing = FastOutSlowInEasing))
+                backProgress.animateTo(1f, animationSpec = DvMotion.settle(DvMotion.quick))
                 step -= 1
                 backProgress.snapTo(0f)
                 isPopping = false
@@ -1286,7 +1346,7 @@ fun OnboardingWizard(viewModel: MainViewModel) {
             scope.launch {
                 backProgress.animateTo(
                     0f,
-                    animationSpec = tween(120, easing = FastOutSlowInEasing)
+                    animationSpec = DvMotion.settle(DvMotion.quick)
                 )
             }
         }
@@ -1374,7 +1434,7 @@ fun OnboardingWizard(viewModel: MainViewModel) {
                     if (goingBack) {
                         EnterTransition.None togetherWith ExitTransition.None
                     } else {
-                        slideInHorizontally(tween(150, easing = FastOutSlowInEasing)) { it } togetherWith fadeOut(tween(130))
+                        slideInHorizontally(DvMotion.settle(DvMotion.quick)) { it } togetherWith fadeOut(DvMotion.settle(DvMotion.quick))
                     }
                 },
                 label = "OnboardingTransition",
@@ -1421,10 +1481,7 @@ fun OnboardingStepContent(
     LaunchedEffect(step) {
         iconScale.animateTo(
             targetValue = 1f,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessLow
-            )
+            animationSpec = DvMotion.Springs.overshoot()
         )
     }
 
@@ -1734,7 +1791,6 @@ fun NoRootScreen(
                 Text(
                     "Connect root access",
                     style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center
                 )
                 Spacer(Modifier.height(8.dp))

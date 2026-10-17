@@ -137,7 +137,7 @@ see [Credits](#-credits).
 | **Backup / Restore Apps** | Five components per app, selected independently |
 | **Backup / Restore Device Data** | SMS & MMS, call logs, contacts, Wi-Fi, wallpaper, Bluetooth |
 | **Backup / Restore Folders** | Any folder you nominate, including `Android/data` |
-| **Manage Backups** | Verify archives and delete them — into the trash first |
+| **Manage Backups** | Verify archives and delete them — into the trash first. App and device archives alike, each with its size, date and health |
 | **Export / Import** | Move the whole vault to another phone as one file |
 
 > App **caches** are not backed up. Apps rebuild their own.

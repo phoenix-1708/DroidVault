@@ -1,6 +1,7 @@
 package com.phoenix.droidvault
 
 import com.phoenix.droidvault.DroidVaultApp
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -92,10 +93,42 @@ class RootAccessStartupTest {
         val after = src.substring(fn)
         val next = after.indexOf("\n    fun ").let { if (it < 0) after.length else it }
         val body = after.substring(0, next)
+        // ...and it must read them back THROUGH THE SHELL, not through `File`.
+        //
+        // The first version of this assertion demanded `length() > 0L` — a direct
+        // filesystem stat from the app's own uid. `/data/adb` is `drwx------`
+        // root:root, so that stat is FALSE for a file that plainly exists:
+        // measured on the reference device, a good 699 KB engine read as absent,
+        // `landed` was permanently false, `installed_version` was never written,
+        // and every caller gating on the deploy refused to run an engine
+        // operation. Invisible on a phone that installed successfully once,
+        // because the gate then short-circuits — so it bites exactly the
+        // clean-install-after-a-flash case this app exists for.
+        //
+        // The guard was enforcing the defect. The shell is the one lens that can
+        // see what landed, because it is root and just wrote those bytes.
+        assertFalse(
+            "installEngine must NOT stat /data/adb with File(): the app's uid " +
+                "cannot traverse it, so a deployed engine reads as missing and the " +
+                "deploy is reported failed forever",
+            Regex("""File\(\s*it\.absolutePath\s*\)""").containsMatchIn(body)
+        )
+        // Bound to the DERIVATION, not to the presence of the string "stat -c".
+        // A first version of this assertion was `body.contains("stat -c")`, which
+        // was satisfied by the *second* stat call — the one in the `missing`
+        // fallback — while the actual verdict had been replaced with `echo 1`.
+        // It passed a mutation that gutted the check. Same failure mode as §2.65:
+        // the guard agrees with a string, and something else in the function is
+        // what made the string true.
         assertTrue(
-            "installEngine must verify the deployed files exist and are non-empty, " +
-                "not trust the shell's exit status",
-            body.contains("length() > 0L")
+            "installEngine must read the deployed sizes back through the root " +
+                "shell, which is the only thing that can see /data/adb",
+            Regex("""val\s+landedSizes\s*=\s*Shell\.cmd""").containsMatchIn(body)
+        )
+        assertTrue(
+            "the landed verdict must be DERIVED from those sizes — an assertion " +
+                "that the check happened is not the same as one that it was used",
+            Regex("""val\s+landed\s*=\s*landedSizes""").containsMatchIn(body)
         )
         assertTrue(
             "the success branch must require the landed check, not just isSuccess",

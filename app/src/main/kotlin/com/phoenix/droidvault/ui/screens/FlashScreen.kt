@@ -99,6 +99,7 @@ import com.phoenix.droidvault.models.AppState
 import com.phoenix.droidvault.models.FlashAction
 import com.phoenix.droidvault.ui.components.CircularCheckbox
 import com.phoenix.droidvault.ui.components.MenuCard
+import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.dvAccent
 import com.phoenix.droidvault.ui.theme.dvContainer
 import com.phoenix.droidvault.ui.theme.DvRole
@@ -496,7 +497,7 @@ fun FlashTab(
             if (goingBack) {
                 EnterTransition.None togetherWith ExitTransition.None
             } else {
-                slideInHorizontally(tween(150, easing = FastOutSlowInEasing)) { it } togetherWith fadeOut(tween(130))
+                slideInHorizontally(DvMotion.settle(DvMotion.quick)) { it } togetherWith fadeOut(DvMotion.settle(DvMotion.quick))
             }
         },
         label = "FlashWizardSteps"
@@ -625,7 +626,6 @@ fun FlashTab(
                                                         Text(
                                                             "Wipe Partitions",
                                                             style = MaterialTheme.typography.titleMedium,
-                                                            fontWeight = FontWeight.Bold,
                                                             color = MaterialTheme.colorScheme.onSurface
                                                         )
                                                         Text(
@@ -639,7 +639,6 @@ fun FlashTab(
                                                         Text(
                                                             "Format Data",
                                                             style = MaterialTheme.typography.titleMedium,
-                                                            fontWeight = FontWeight.Bold,
                                                             color = MaterialTheme.colorScheme.error
                                                         )
                                                         Text(
@@ -670,7 +669,14 @@ fun FlashTab(
                                                 imageVector = Icons.Default.DragHandle,
                                                 contentDescription = "Drag to reorder",
                                                 modifier = Modifier
-                                                    .size(40.dp)
+                                                    // 48dp, not 40: this is a live drag target, and it is the only
+                                                    // interactive bare `Icon` in the app - it carries `pointerInput`,
+                                                    // not a button, so a button-level touch guard cannot see it. The
+                                                    // row's Column is weight(1f), so the extra 8dp comes out of the
+                                                    // title's width and the title already ellipsises. NOT device-
+                                                    // verified: this list renders only while an ORS job is running,
+                                                    // and reaching it means starting a real flash.
+                                                    .size(48.dp)
                                                     .pointerInput(action.id) {
                                                         detectVerticalDragGestures(
                                                             onDragEnd = { dragOffset = 0f },
@@ -704,8 +710,17 @@ fun FlashTab(
 
                                             IconButton(onClick = {
                                                 currentViewModel.removeAction(currentIndexState)
-                                            }, modifier = Modifier.size(40.dp)) {
-                                                Icon(Icons.Default.Close, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(24.dp))
+                                            }) {
+                                                // Was `null`. A destructive control - it drops the action out of
+                                                // the flash order - that a screen reader could announce as nothing at
+                                                // all. Pairs with the handle's "Drag to reorder", so the row reads
+                                                // as: what this is, move it, or remove it.
+                                                Icon(
+                                                    Icons.Default.Close,
+                                                    contentDescription = "Remove from the flash order",
+                                                    tint = MaterialTheme.colorScheme.error,
+                                                    modifier = Modifier.size(24.dp)
+                                                )
                                             }
                                         }
                                     }
@@ -812,7 +827,6 @@ fun FlashTab(
                                     Text(
                                         "Storage Decrypted!",
                                         style = MaterialTheme.typography.titleLarge,
-                                        fontWeight = FontWeight.ExtraBold,
                                         color = MaterialTheme.colorScheme.onPrimaryContainer
                                     )
                             }
@@ -863,7 +877,6 @@ fun FlashTab(
                                     Text(
                                         "Ready to Flash!",
                                         style = MaterialTheme.typography.titleLarge,
-                                        fontWeight = FontWeight.ExtraBold,
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))

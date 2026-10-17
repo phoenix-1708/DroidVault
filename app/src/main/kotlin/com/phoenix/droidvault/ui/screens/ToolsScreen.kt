@@ -36,10 +36,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.phoenix.droidvault.MainViewModel
+import com.phoenix.droidvault.ui.components.PickedImportSheet
 import com.phoenix.droidvault.models.AppInfo
 import com.phoenix.droidvault.models.AppState
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.ui.components.MenuCard
+import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.DvRole
 import kotlinx.coroutines.launch
 
@@ -92,13 +94,18 @@ fun ToolsTab(appState: AppState, appList: List<AppInfo>, viewModel: MainViewMode
                 EnterTransition.None togetherWith ExitTransition.None
             } else {
 
-                slideInHorizontally(tween(150, easing = FastOutSlowInEasing)) { it } togetherWith fadeOut(tween(130))
+                slideInHorizontally(DvMotion.settle(DvMotion.quick)) { it } togetherWith fadeOut(DvMotion.settle(DvMotion.quick))
             }
         },
         label = "ToolsTransition"
     ) { isMenu ->
         if (!isMenu) {
             MigratorActionScreen(liveState, appList, viewModel)
+            // The Tools tab launches the same picker as Migrate, so it owns
+            // the same confirmation. Without this the pick resolved and
+            // nothing appeared — the state was set on a tab that does not
+            // compose MigratorTab, where the sheet lived.
+            PickedImportSheet(viewModel)
         } else {
 
             Column(modifier = Modifier

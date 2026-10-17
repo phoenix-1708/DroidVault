@@ -53,6 +53,7 @@ import coil.compose.AsyncImage
 import com.phoenix.droidvault.models.AppInfo
 import com.phoenix.droidvault.models.AppParts
 import com.phoenix.droidvault.models.MigratorMode
+import com.phoenix.droidvault.ui.theme.DvMotion
 
 private fun compIcon(id: Int): ImageVector = when (id) {
     AppParts.APP -> Icons.Default.Android
@@ -149,7 +150,6 @@ fun AppComponentScreen(
                         Text(
                             app.label,
                             style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -252,9 +252,13 @@ fun AppComponentScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             if (selected.isEmpty()) "Nothing selected"
-                            else "${selected.size} of ${com.phoenix.droidvault.models.AppParts.count(selectable.size, "part")}}",
+                            // One `}` too many rendered a literal brace into this
+                            // line: "2 of 3 parts}". The count is the string;
+                            // the wrapper around it is text too, and is written
+                            // as text so it has no template to get wrong.
+                            else selected.size.toString() + " of " +
+                                com.phoenix.droidvault.models.AppParts.count(selectable.size, "part"),
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
                         )
                         Text(
                             if (isRestore) "Restored from the vault archive"
@@ -334,7 +338,6 @@ private fun SelectAllRow(
                 Text(
                     if (allSelected) "Clear all" else "Select all",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
                 )
                 if (anySelected && !allSelected) {
                     Text(
@@ -372,7 +375,6 @@ private fun NothingRestorableCard(
                 if (consentBlocked) "Restore consent is off"
                 else "Nothing to restore",
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onErrorContainer
             )
             Spacer(Modifier.height(4.dp))
@@ -403,12 +405,12 @@ private fun ComponentRow(
     // the user still needs to see WHAT exists so they can act on the reason.
     val alpha by animateFloatAsState(
         targetValue = if (enabled) 1f else 0.5f,
-        animationSpec = tween(200),
+        animationSpec = DvMotion.settle(),
         label = "compAlpha"
     )
     val borderColor by animateFloatAsState(
         targetValue = if (checked) 1f else 0f,
-        animationSpec = tween(180),
+        animationSpec = DvMotion.settle(),
         label = "compBorder"
     )
 
@@ -447,7 +449,6 @@ private fun ComponentRow(
                     Text(
                         AppParts.label(id),
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold
                     )
                     if (blockedReason != null) {
                         Spacer(Modifier.width(6.dp))
@@ -472,7 +473,6 @@ private fun ComponentRow(
                 Text(
                     formatComponentSize(sizeKb),
                     style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
                     color = if (enabled) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -512,7 +512,6 @@ private fun EstimateCard(
                 Text(
                     formatComponentSize(estimateKb),
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
                 )
             }
             if (selected.isEmpty()) {

@@ -1701,4 +1701,1178 @@ class ConventionGuardTest {
             }
         }
     }
+
+    /**
+     * `alreadyStaged` means "the caller already took the run gate", NOT "the
+     * archive is already on disk".
+     *
+     * Found on device by the Import page, which passed it because the export IS
+     * on disk — a true statement about the wrong thing. `importVaultFrom` reads
+     * it as "skip the gate and the isRunning/progress setup", so the import began
+     * with no gate held and no running flag: the engine never launched, nothing
+     * was written, and the screen looked untouched after the tap. A refused
+     * import and a successful one look identical, which is invariant 22's
+     * failure wearing a parameter.
+     *
+     * The parameter does two unrelated jobs, so nothing but a guard separates
+     * them — and the misuse compiles, runs, and reports nothing.
+     */
+    @Test
+    fun `only the URI importer passes alreadyStaged, because only it took the gate`() {
+        val vm = read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/MainViewModel.kt"))
+
+        val uriImporter = vm.substringAfter("fun importVaultFromUri").substringBefore("fun importTransfer")
+        assertTrue(
+            "could not locate importVaultFromUri, so this guard is not inspecting " +
+                "the function it was written for",
+            uriImporter.contains("alreadyStaged") && uriImporter.length > 200
+        )
+
+        // The Import page's entry point must let importVaultFrom take the gate.
+        val pageEntry = vm.substringAfter("fun importTransfer").substringBefore("fun cancelImport")
+        assertTrue("could not locate importTransfer", pageEntry.length > 200)
+        assertFalse(
+            "importTransfer must NOT pass alreadyStaged: it has not taken the run " +
+                "gate, so passing it starts an import with no gate and no isRunning " +
+                "flag — the engine silently never runs and the screen looks unchanged",
+            pageEntry.contains("alreadyStaged")
+        )
+    }
+
+    // --- a count is a string, and a wrapper is text too -------------------
+
+    /**
+     * A template must not close itself and then close again.
+     *
+     * §2.67 shipped `5/5 parts}` on every run the app had ever made. A `}`
+     * outside `${…}` is an ORDINARY CHARACTER — the compiler has no opinion, and
+     * a unit suite asserting logic cannot see a literal. The screen that shows
+     * the string is where it is visible, which is why these all survived:
+     * §2.67's run subtitle, then **"1 deleted backup} recoverable"** in the
+     * trash card (found on device 2026-10-15), then two more in the same sweep —
+     * **"Successfully installed 1 app}"** and **"2 of 3 parts}"**. Three screens,
+     * one keystroke, all the same missing brace.
+     *
+     * The shape is specific and it is the shape a hand-written template takes
+     * when the author counts braces instead of reading the line: `${`, a call
+     * whose own parentheses close, and then a `}` for the template PLUS one that
+     * is simply a character. The no-newline class is what makes this decidable:
+     * a placeholder runs to the end of its line, so the rule cannot pair a `${`
+     * from one line with a `)` from another, and a legitimate `${when { … }}`
+     * never matches because nothing closes a CALL inside it.
+     *
+     * The first attempt at this rule counted braces across whole string literals
+     * and was deleted: 1224 false positives on a clean tree, because a Kotlin
+     * `${…}` may contain arbitrary expressions with their own strings and
+     * braces. The version before THAT hung the suite at 100% CPU for fifteen
+     * minutes on a bare `$` in a shell string. A guard that false-positives gets
+     * deleted and a guard that hangs gets killed, so this one is anchored to the
+     * defect's actual shape instead of to a general parse.
+     *
+     * `UserFacingStringTest` covers the other half: that the PRODUCERS — count,
+     * progressMeta, batchLabel, sizeLabel — never emit a brace at all.
+     */
+    @Test
+    fun `user-facing string keeps no template to itself`() {
+        val stray = Regex("""\$\{[^\n]*\)\s*\}\s*\}""")
+        val offenders = mutableListOf<String>()
+        for (file in kotlinSources()) {
+            val relative = file.relativeTo(mainSrc).path
+            file.readLines().forEachIndexed { i, line ->
+                val t = line.trim()
+                if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return@forEachIndexed
+                // A quoted line, because that is the only place a template
+                // reaches a user. The brace-counting that is NOT wanted is
+                // Compose's own trailing-lambda chaining — `TextButton(…) {
+                // Text("Cancel") }` — and none of that opens a template.
+                if ('"' in line && stray.containsMatchIn(line)) {
+                    offenders += "$relative:${i + 1}  ${t.take(96)}"
+                }
+            }
+        }
+        assertTrue(
+            "a template that closes twice renders the second `}` to the user — " +
+                "concatenate instead, so the wrapper is text with no template " +
+                "to get wrong:\n" + offenders.joinToString("\n"),
+            offenders.isEmpty()
+        )
+    }
+
+    // --- a control row must not hide controls -----------------------------
+
+    /**
+     * A row of action chips must WRAP, never scroll sideways.
+     *
+     * The Migrate chip row was a `LazyRow`, and the chips inside it collapsed
+     * to bare circles that revealed their name for three seconds. Together those
+     * meant six named controls rendered as one and a half lines with "All System
+     * Apps" and "Auto Select" past the right edge — so a user could not see that
+     * they existed, could not name the ones they could see, and had to swipe a
+     * row that looked complete to find out. Nothing in the layout said anything
+     * was there.
+     *
+     * Every other chip group in this app had already been converted: the
+     * Automation tab's device chips through `FlowChipGroup`, and the Migrate
+     * label filter inline. This chip row was the one left behind, which is worth
+     * recording: a pattern that is right in three places and wrong in the fourth
+     * does not read as a pattern until the fourth is named.
+     *
+     * Matched on the FILE, because a guard that greps for a name it was told
+     * about inspects only the call site someone remembers to re-point.
+     */
+    @Test
+    fun `the migrate chip row wraps rather than scrolling`() {
+        val offenders = mutableListOf<String>()
+        for (name in listOf("MigratorScreen.kt", "SharedComponents.kt")) {
+            val file = File(mainSrc, "com/phoenix/droidvault/ui/screens/$name").let {
+                if (it.exists()) it else File(mainSrc, "com/phoenix/droidvault/ui/components/$name")
+            }
+            assertTrue("could not find $name — re-point this guard", file.exists())
+            val src = codeKeepLines(file.readText())
+            src.lines().forEachIndexed { i, line ->
+                val t = line.trim()
+                if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return@forEachIndexed
+                if (Regex("""\bLazyRow\s*\(""").containsMatchIn(line) ||
+                    Regex("""\bhorizontalScroll\(""").containsMatchIn(line)
+                ) {
+                    offenders += "${file.name}:${i + 1}  ${t.take(96)}"
+                }
+            }
+        }
+        assertTrue(
+            "a horizontally scrolling row of controls hides the ones past the " +
+                "edge with nothing to say they are there — wrap with FlowRow:\n" +
+                offenders.joinToString("\n"),
+            offenders.isEmpty()
+        )
+    }
+
+    @Test
+    fun `every chip on the migrate row carries a name`() {
+        // The other half of the same fix. Collapsing a chip to its icon is fine
+        // for a control the user has used fifty times and useless for one they
+        // have not: `AnimatedFilterChip` takes a `label` and renders it, so a
+        // call site that cannot render its label has no way to say so.
+        val file = File(mainSrc, "com/phoenix/droidvault/ui/components/SharedComponents.kt")
+        val src = codeKeepLines(file.readText())
+        val fn = src.substringAfter("fun AnimatedFilterChip(").substringBefore("\n}")
+        assertTrue(
+            "could not locate AnimatedFilterChip — re-point this guard",
+            fn.length > 200
+        )
+        assertTrue(
+            "AnimatedFilterChip must render its label unconditionally; a chip " +
+                "that hides its name is a circle the user has to guess at",
+            fn.contains("text = label") && !fn.contains("labelVisible")
+        )
+        // And every call site must actually pass one.
+        val migrate = codeKeepLines(
+            File(mainSrc, "com/phoenix/droidvault/ui/screens/MigratorScreen.kt").readText()
+        )
+        val bare = mutableListOf<Int>()
+        for (m in Regex("""AnimatedFilterChip\(""").findAll(migrate)) {
+            // 700 chars is wider than the longest call site in the file; the
+            // point is only to see whether a `label =` appears before the next
+            // one starts.
+            if (!migrate.substring(m.range.last, m.range.last + 700).contains("label = ")) {
+                bare.add(migrate.take(m.range.last).count { it == '\n' } + 1)
+            }
+        }
+        assertTrue(
+            "expected at least ten Migrate chip call sites — if this is empty " +
+                "the guard is inspecting nothing",
+            Regex("""AnimatedFilterChip\(""").findAll(migrate).count() >= 10
+        )
+        assertTrue(
+            "these AnimatedFilterChip call sites pass no label, so the chip " +
+                "renders as an unnameable circle:\n" +
+                bare.joinToString("\n") { "  MigratorScreen.kt:$it" },
+            bare.isEmpty()
+        )
+    }
+
+    // --- long explanations must stay reachable ---------------------------
+
+    /**
+     * A help string with blank lines in it has to be scrollable, or the bottom
+     * is unreachable.
+     *
+     * `InfoBody` renders an explanation into a `Surface` with no scroll. The
+     * Import page's help is four paragraphs separated by blank lines, which at a
+     * 2x font scale is taller than the row it sits in — so the text would be
+     * clipped with no way to reach the end, and a user who turned their font up
+     * would be the only one who could not finish reading.
+     *
+     * `ComponentHelpDialog` hit exactly this and fixed it with
+     * `verticalScroll`. This is the same hazard reached from the other
+     * direction: the dialog is bounded by the screen, the inline block is not.
+     */
+    // --- the diagnostics log is the record --------------------------------
+
+    /**
+     * Every path that moves data into the trash must WRITE IT DOWN.
+     *
+     * Invariant 11 makes "delete is a move, not an erase" the app's central
+     * promise about its most destructive action, and until this guard existed
+     * that promise left no trace anywhere except a toast. Three different routes
+     * reach `moveToTrash` — the Erase Native dialog, the Manage card's per-item
+     * control, and an export delete — so "which batch is b1792073022516?" was
+     * unanswerable offline, and the trash index (a `DVTRASH1` file) is not
+     * something a user reads or a bug report carries.
+     *
+     * The index-write failure was worse: it went to `android.util.Log` ONLY,
+     * which R8 strips in release, which the in-app Diagnostics screen does not
+     * show, and which is gone by the time anyone reads a report — for the one
+     * failure that leaves archives under `.trash/<id>/` with no manifest entry,
+     * so invisible, unrestorable from the app, never purged, while the user was
+     * told "recoverable for 7 days".
+     *
+     * Scoped to the function body rather than the file, so a log call somewhere
+     * else in `MigratorManager` cannot stand in for the one that was removed —
+     * the `chcon` lesson, and `rustSpanLike` exists for exactly this.
+     */
+    @Test
+    fun `quarantining data is written to the diagnostics log`() {
+        val file = File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/utils/MigratorManager.kt")
+        val src = codeKeepLines(file.readText())
+        val owner = funSpan(src, "moveToTrash")
+        assertNotNull("could not find fun moveToTrash — re-point this guard", owner)
+        // The SUBSTANCE of the record, not the presence of a logger call. The
+        // first version of this guard asserted `body.contains("DroidVaultLogger")`
+        // and was satisfied by the index-failure line two statements above, so
+        // DELETING the quarantine record outright passed it — the `chcon` lesson
+        // exactly, and the reason a guard has to name the thing it protects
+        // rather than the mechanism it uses.
+        //
+        // What it still cannot see is a record that is present but unreachable
+        // (`if (false) DroidVaultLogger…`). That is not a regression anyone
+        // introduces by editing; it is a thing to be caught by reading, and a
+        // guard that pretended otherwise would be claiming more than it checks.
+        assertTrue(
+            "moveToTrash must record what it moved: the batch id is the only " +
+                "handle a user has on a deletion, and a toast is gone in seconds",
+            owner!!.contains("quarantined") && owner.contains("DroidVaultLogger")
+        )
+        // And the irreversible one separately, because it is the one a report
+        // is most often about and the one with no undo left to check.
+        val purge = funSpan(src, "purgeTrashBatch")
+        assertNotNull("could not find fun purgeTrashBatch — re-point this guard", purge)
+        assertTrue(
+            "purging is the only irreversible action in the app and must say so " +
+                "in the log, not only in a confirm dialog",
+            purge!!.contains("not recoverable") && purge.contains("DroidVaultLogger")
+        )
+        val restore = funSpan(src, "restoreTrashBatch")
+        assertNotNull("could not find fun restoreTrashBatch — re-point this guard", restore)
+        assertTrue(
+            "an undo that silently put back some of a batch leaves a state " +
+                "neither the user nor the next reader can account for",
+            restore!!.contains("restored") && restore.contains("DroidVaultLogger")
+        )
+    }
+
+    @Test
+    fun `no data-destroying path logs only to logcat`() {
+        // The specific mistake, not the general one. `android.util.Log` is
+        // stripped by R8 in release and is not readable through the app's own
+        // Diagnostics screen, so a finding that exists only there is invisible
+        // to the one tool a field report is built from. AGENTS.md already says
+        // the gate's decisions live in the log "not in logcat"; this is that
+        // rule applied to the trash, where the worst failure had been doing the
+        // opposite for months.
+        val offenders = mutableListOf<String>()
+        for (name in listOf("MigratorManager.kt", "MainViewModel.kt", "DeviceManager.kt")) {
+            val file = File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/$name").let {
+                if (it.exists()) it
+                else File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/utils/$name")
+            }
+            assertTrue("could not find $name — re-point this guard", file.exists())
+            val src = codeKeepLines(file.readText())
+            val lines = src.lines()
+            lines.forEachIndexed { i, line ->
+                val t = line.trim()
+                if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) return@forEachIndexed
+                if (!Regex("""android\.util\.Log\.[diewv]\(""").containsMatchIn(line)) {
+                    return@forEachIndexed
+                }
+                // A line is allowed to do BOTH, and the nearby ones often do.
+                val window = lines.drop(i).take(4).joinToString("\n")
+                if (!window.contains("DroidVaultLogger")) {
+                    offenders += "$name:${i + 1}  ${t.take(90)}"
+                }
+            }
+        }
+        assertTrue(
+            "these log to logcat only, which R8 strips in release and the " +
+                "in-app Diagnostics screen never shows — a field report cannot " +
+                "carry it:\n" + offenders.joinToString("\n"),
+            offenders.isEmpty()
+        )
+    }
+
+    /**
+     * The body of a Kotlin `fun`, by brace matching from its declaration.
+     *
+     * Same reasoning as `rustSpanLike`, and for the same reason: a guard that
+     * greps a whole file for the thing it names is not guarding that thing.
+     */
+    private fun funSpan(source: String, name: String): String? {
+        val decl = Regex("""\bfun\s+$name\s*\(""").find(source) ?: return null
+        val open = source.indexOf('{', decl.range.last)
+        if (open < 0) return null
+        var depth = 0
+        for (i in open until source.length) {
+            when (source[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return source.substring(open, i + 1)
+                }
+            }
+        }
+        return null
+    }
+
+    @Test
+    fun `a multi-paragraph explanation is scrollable`() {
+        val autoInfo = File(mainSrc, "com/phoenix/droidvault/ui/components/AutoInfo.kt")
+        val src = codeKeepLines(autoInfo.readText())
+        val body = src.substringAfter("private fun InfoBody(").substringBefore("\n}")
+        assertTrue("could not locate InfoBody — re-point this guard", body.length > 100)
+        assertTrue(
+            "InfoBody must scroll: a multi-paragraph explanation is taller than " +
+                "the block it renders into, and a clipped explanation with no " +
+                "way to scroll is an explanation half the users never read",
+            body.contains("verticalScroll")
+        )
+    }
+
+    // --- a live view must move only when asked ---------------------------
+
+    /**
+     * The Live log must not yank the reader back to the newest line.
+     *
+     * The sheet scrolled to `size - 1` on every size change, unconditionally.
+     * The log grows many times a second while a run is going, so scrolling up
+     * to read a line was impossible — the next line snapped the view back down.
+     * That is invariant 31's shape on a scroll position: a live view that moves
+     * when nobody asked it to is worse than a static one, because the reader has
+     * no way to stay where they were.
+     *
+     * Guarded because the unconditional version is SHORTER and looks obviously
+     * right, which is exactly how it survived in the first place. Scoped to the
+     * sheet's own function so a `shouldStickToTail` call elsewhere in the file
+     * cannot stand in for the one that was removed.
+     */
+    @Test
+    fun `the live log only follows the tail when the reader is there`() {
+        val file = File(mainSrc, "com/phoenix/droidvault/ui/screens/SettingsScreen.kt")
+        val src = codeKeepLines(file.readText())
+        val sheet = src.substringAfter("if (showLogSheet) {")
+        assertTrue(
+            "could not locate the Live log sheet — re-point this guard",
+            sheet.length > 500
+        )
+        assertTrue(
+            "the Live log's auto-scroll must ask DiagLog.shouldStickToTail; an " +
+                "unconditional scrollToItem/ animateScrollToItem on the last index " +
+                "yanks the reader back every time a line arrives",
+            sheet.contains("DiagLog.shouldStickToTail")
+        )
+        assertTrue(
+            "and it must not scroll to the last item without that check",
+            !Regex("""LaunchedEffect\([^)]*size\)\s*\{[^}]*scrollToItem\(""").containsMatchIn(sheet)
+        )
+        // The decision needs a LAID-OUT list to make it. On the opening frame
+        // `layoutInfo` is empty, so an effect that reads the last visible index
+        // without waiting finds nothing, decides nothing, and the sheet opens
+        // on the OLDEST line -- which is what it did, with 105 lines in memory.
+        // The wait is therefore part of the rule, and `snapshotFlow` is what
+        // provides it; a guard that only checked the call would have watched a
+        // dead decision pass as enforced.
+        assertTrue(
+            "the Live log's tail scroll must wait for the list to be laid out " +
+                "(snapshotFlow ... first), or the sheet opens at the oldest line",
+            sheet.contains("snapshotFlow") && sheet.contains(".first { it > 0 }")
+        )
+    }
+
+    @Test
+    fun `the diagnostics sheet has a severity filter and a search`() {
+        // Both exist for the same reason: 2000 lines in one grey is a file, not
+        // a diagnostic tool, and the question the screen exists to answer is
+        // "what went wrong" — one E line somewhere in the middle of them. Cheap
+        // to lose to a refactor that tidies the sheet, and the loss is silent:
+        // the sheet still works, it just stops being usable on a real log.
+        val file = File(mainSrc, "com/phoenix/droidvault/ui/screens/SettingsScreen.kt")
+        val sheet = codeKeepLines(file.readText())
+            .substringAfter("if (showLogSheet) {")
+        assertTrue("the severity filter is gone", sheet.contains("DiagLog.LEVELS"))
+        assertTrue("the search box is gone", sheet.contains("logQuery"))
+    }
+
+    /**
+     * A state that tells the user to go elsewhere must offer the action, or say
+     * why there is nothing to offer.
+     *
+     * The Import empty state read "Export a backup from the Migrate tab and it
+     * will be listed here" — an instruction to leave, with nothing on the page
+     * to do instead. And the reason it is the wrong shape is that the reader is
+     * most often someone who has just flashed their phone, for whom the vault
+     * is intact and no export is needed at all.
+     *
+     * Guarded because the fix is a deletion waiting to happen: removing the
+     * button leaves a page that still compiles, still renders and still says
+     * something sensible-looking. The loss is silent, and it is the deletion
+     * that looks like tidying.
+     */
+    @Test
+    fun `the import empty state offers the action instead of only describing it`() {
+        val file = File(mainSrc, "com/phoenix/droidvault/ui/screens/TransferImportScreen.kt")
+        val src = codeKeepLines(file.readText())
+        val body = src.substringAfter("private fun EmptyBody(")
+        assertTrue("could not locate EmptyBody — re-point this guard", body.length > 200)
+        assertTrue(
+            "the Import empty state must offer an Export action, not just " +
+                "describe going to another tab",
+            body.contains("Export backups")
+        )
+        // And it must actually be wired to something, not left as a label: a
+        // button that renders and does nothing is worse than no button, because
+        // it spends the reader's trust to buy nothing.
+        assertTrue(
+            "the Export button renders but has no action",
+            body.contains("onClick = onExport")
+        )
+    }
+
+    /**
+     * A transfer confirmation is defined once, and screens render it rather than
+     * writing their own.
+     *
+     * Two operations gained a confirmation in the same change and there are four
+     * ways into them — the listed import, the picker, the empty state and Manage
+     * Backups. A second copy of a confirmation sheet is the obvious thing to
+     * write when adding a fourth entry point, and two copies drift: the one
+     * that ships is the one somebody edited last, and the answers about what
+     * happens to existing backups stop matching between screens.
+     *
+     * **The first version of this guard checked for a second declaration of the
+     * function name, and passed a mutation that had re-inlined the whole dialog.**
+     * A renamed private copy is not the realistic drift; an inline sheet under
+     * the same title is. So it looks for the thing itself.
+     */
+    @Test
+    fun `a transfer confirmation is defined once and screens render it`() {
+        val sheet = File(mainSrc, "com/phoenix/droidvault/ui/components/TransferConfirmSheet.kt")
+        assertTrue("the shared transfer confirmation sheet is missing", sheet.exists())
+        for (decl in listOf("ExportConfirmSheet", "ImportConfirmSheet")) {
+            assertEquals(
+                "$decl must be declared exactly once",
+                1,
+                Regex("fun $decl\\(").findAll(sheet.readText()).count()
+            )
+        }
+
+        val screens = File(mainSrc, "com/phoenix/droidvault/ui/screens")
+            .walkTopDown()
+            .filter { it.extension == "kt" }
+            .toList()
+
+        // Nobody re-inlines a confirmation. The shared component lives in
+        // ui/components, so anything in ui/screens holding its own sheet under
+        // its title is a private copy of it.
+        val inlined = screens
+            .filter { f ->
+                val text = f.readText()
+                text.contains("ModalBottomSheet(") &&
+                    (text.contains("\"Export your backups?\"") ||
+                        text.contains("\"Import this backup?\""))
+            }
+            .map { it.name }
+        assertTrue(
+            "these screens hold their own copy of a transfer confirmation: $inlined — " +
+                "render ImportConfirmSheet / ExportConfirmSheet from ui/components instead",
+            inlined.isEmpty()
+        )
+
+        // And every screen that can START a transfer can also confirm one, or the
+        // gate exists only where a list happened to be. The picker is launched
+        // from Migrate AND Tools, so both must own the picked-file sheet.
+        for (owner in listOf("MigratorScreen.kt", "ToolsScreen.kt")) {
+            val f = File(mainSrc, "com/phoenix/droidvault/ui/screens/$owner")
+            assertTrue(
+                "$owner can start a transfer but never renders a confirmation — " +
+                    "the operation is one tap into the vault with nothing said",
+                f.exists() && f.readText().contains("PickedImportSheet(viewModel)")
+            )
+        }
+    }
+
+    /**
+     * An import is confirmed before it starts — from EVERY entry point.
+     *
+     * `importTransfer` used to run straight from a list row: one tap and a
+     * multi-minute write was expanding tens of gigabytes into the vault. The
+     * guard exists because the fix is a deletion waiting to happen — removing
+     * the sheet leaves a screen that compiles, renders and starts working.
+     */
+    @Test
+    fun `an import is confirmed before it starts, from every entry point`() {
+        val screen = File(mainSrc, "com/phoenix/droidvault/ui/screens/TransferImportScreen.kt")
+        val src = codeKeepLines(screen.readText())
+        assertTrue(
+            "a listed import must open ImportConfirmSheet before importTransfer",
+            src.contains("ImportConfirmSheet(")
+        )
+        assertTrue(
+            "and must not reach importTransfer from the row itself — one tap is " +
+                "how a 34 GB write started",
+            !Regex("""if \(c\.canImport\)\s*viewModel\.importTransfer""").containsMatchIn(src)
+        )
+
+        // And the SAF entry point resolves and waits, rather than importing.
+        val vm = File(mainSrc, "com/phoenix/droidvault/MainViewModel.kt").readText()
+        val body = vm.substringAfter("fun importVaultFromUri(")
+            .substringBefore("fun dismissPendingPick()")
+        assertTrue(
+            "importVaultFromUri must only RESOLVE and wait for the confirmation — " +
+                "it was the one way into a 34 GB write with nothing said first",
+            body.contains("resolvePickedTransfer") && !body.contains("importVaultFrom(")
+        )
+    }
+    /**
+     * An export row must SHOW its action, not merely be tappable.
+     *
+     * The Import card was clickable all along and looked like static text —
+     * two lines of grey under a raw timestamp, with nothing on screen saying
+     * that tapping it started a thirty-gigabyte write. A control nobody can find
+     * is not a control, which is invariant 50's shape one level down: the rule is
+     * about a control explaining itself, and this one did not exist visually at
+     * all.
+     *
+     * Guarded because deleting the button leaves a screen that compiles, renders
+     * and still works — for anyone who already knows. The failure is invisible
+     * to everyone else and to every test.
+     */
+    @Test
+    fun `an export row shows an Import action`() {
+        val file = File(mainSrc, "com/phoenix/droidvault/ui/screens/TransferImportScreen.kt")
+        val src = codeKeepLines(file.readText())
+        val row = src.substringAfter("private fun TransferRow(")
+        assertTrue("could not locate TransferRow — re-point this guard", row.length > 300)
+        // The LABEL, not the word. The first version of this guard checked for
+        // "Import" anywhere in the row and passed a mutation that had deleted
+        // the button — because the row's own explanation ends "Import will check
+        // before it writes anything", so the token was still there. A guard whose
+        // token also appears in the sentence it guards guards nothing.
+        assertTrue(
+            "the export row must render an Import BUTTON, not only accept taps",
+            row.contains("Button(") && row.contains("""Text("Import"""")
+        )
+    }
+
+    /**
+     * A status whose colour is a neutral tone is not a status.
+     *
+     * `Complete` was `colorScheme.tertiary` at 16% alpha — indistinguishable on
+     * the card from a disabled control, on the one row whose whole job is to say
+     * whether it can be restored. The three states come from `DvRole`, which is
+     * what `AccentContrastTest` measures.
+     */
+    @Test
+    fun `export status uses semantic roles, not a neutral tint`() {
+        val file = File(mainSrc, "com/phoenix/droidvault/ui/screens/TransferImportScreen.kt")
+        val src = codeKeepLines(file.readText())
+        val line = src.substringAfter("private fun TransferStateLine(")
+        for (role in listOf("DvRole.Success", "DvRole.Warning", "DvRole.Error")) {
+            assertTrue(
+                "the export status line does not use $role — a state with no " +
+                    "colour stops being readable as a state",
+                line.contains(role)
+            )
+        }
+    }
+
+    /**
+     * The theme root must default the content colour.
+     *
+     * A `Surface` resolves `contentColor = contentColorFor(color)`, and
+     * `contentColorFor` answers only for the roles it knows — for a
+     * `surfaceContainer*` colour it returns `Unspecified`, so the container
+     * inherits whatever is above it. On this app that was `primary`, so every
+     * colourless `Text` inside one of the 29 container Surfaces rendered in the
+     * accent blue instead of the reading colour. The Home shortcut titles read
+     * as hyperlinks and `Magisk 30.7.5` read as a link rather than a value.
+     *
+     * It survived because it was INVISIBLE under the setting that shipped as the
+     * default: with dynamic colour on, the wallpaper's `primary` was a pale
+     * near-white, so `primary` and `onSurface` were indistinguishable on screen.
+     * `AccentContrastTest` cannot see it either — every role it checks is one
+     * the app sets explicitly, and this one was inherited.
+     *
+     * The fix is one line at the theme root rather than 29 edits, which is why
+     * the guard is on that one line: deleting it re-breaks every container at
+     * once, and nothing else in the suite would notice.
+     *
+     * Mutation-verified: removing the provider fails this.
+     */
+    @Test
+    fun `the theme root defaults the content colour so containers cannot inherit primary`() {
+        val src = codeKeepLines(
+            File(mainSrc, "com/phoenix/droidvault/ui/theme/Theme.kt").readText()
+        )
+        assertTrue(
+            "DroidVaultTheme no longer provides LocalContentColor — every " +
+                "container Surface that does not resolve its own will inherit " +
+                "primary again and render body text in the accent blue",
+            src.contains("LocalContentColor provides") &&
+                src.contains("colorScheme.onSurface")
+        )
+    }
+
+    /**
+     * Durations come from `DvMotion`, never from a literal.
+     *
+     * The UI carried fourteen literal durations across 56 call sites — 120, 130,
+     * 140, 150, 160, 180, 200, 220, 250, 350, 400, 800, 900, 1200 — and the
+     * neighbours inside the first cluster are not distinguishable by anyone,
+     * including whoever typed them. They were drift rather than intent: each
+     * screen tuned separately, none of the tunings reconciled. Naming them is
+     * only half of it; without this the next screen adds a sixteenth number and
+     * the drift resumes.
+     *
+     * Scoped to `ui/` and to the two spellings that actually carry a duration, so
+     * it cannot fire on a numeric argument that is not a time.
+     *
+     * Mutation-verified: `tween(300)` and `durationMillis = 450` both fail it.
+     */
+    @Test
+    fun `animation durations come from DvMotion, not from a literal`() {
+        val ui = File(mainSrc, "com/phoenix/droidvault/ui")
+        val literal = Regex("""tween\(\s*\d|durationMillis\s*=\s*\d""")
+        val offenders = ui.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "DvMotion.kt" }
+            .mapNotNull { f ->
+                val text = codeKeepLines(f.readText())
+                literal.find(text)?.let {
+                    val line = text.substring(0, it.range.first).count { c -> c == '\n' } + 1
+                    "${f.name}:$line"
+                }
+            }
+            .toList()
+        assertTrue(
+            "literal animation durations are back — name them in DvMotion " +
+                "instead. ${offenders.size} site(s): ${offenders.joinToString()}",
+            offenders.isEmpty()
+        )
+    }
+
+    /**
+     * A rotation is linear, and the reason is the reason.
+     *
+     * `DvMotion.rotate()` is the only linear spec, and it exists because an eased
+     * rotation decelerates into the top of every turn and accelerates out of the
+     * bottom — the hitch a user reads as a spinner that stopped. Asserting the
+     * property and not just the call keeps the *why* attached to the value: a
+     * future edit that eases the rotation to look "smoother" fails here instead.
+     */
+    /**
+     * A tab's content must not be clipped to a circle.
+     *
+     * `clip(CircleShape)` on a Box clips to a circle whose DIAMETER is the box's
+     * SHORTER side. Each bottom-nav tab is a full slot wide (213px on the
+     * reference phone) and about half that tall, so the clip was a ~150px circle
+     * and the chord across it at the label's vertical position was roughly 90px.
+     *
+     * The label fitter right above it measured "Migrate" at 200px against a
+     * 213px slot and correctly shrank it — against a width the pixels never had.
+     * At a 2x font the final 'e' was cut in half. The fitter was right and the
+     * geometry was wrong, which is why this could not be found by reading either
+     * one: measured on device, the label gained 3px the moment the clip went.
+     *
+     * The pill carries its own `clip(CircleShape)`, so the tab box never needed
+     * one — and with `indication = null` there is no ripple for it to shape.
+     *
+     * Scoped to the tab loop so it cannot fire on the genuinely round nodes
+     * elsewhere (the icon badge, the progress ring, the pill itself).
+     * Mutation-verified: putting the clip back fails this.
+     */
+    /**
+     * The Home shortcut grid derives its column count; it does not declare one.
+     *
+     * It was `shortcuts.chunked(SHORTCUT_COLUMNS)` with a constant of 2, and a
+     * fixed column count is only correct at one font scale. At 2x the tile is the
+     * same number of dp wide and twice the type, so every title truncated —
+     * "Back up a…", "Manage b…" — and nothing reported it, because nothing about
+     * the layout had changed, only the type inside it.
+     *
+     * The column count is now the largest that fits the **measured** widest
+     * title, using the same `rememberTextMeasurer` approach the bottom-nav
+     * labels use. One column at 2x, two at 1x, and the title is given a second
+     * line when it has the width for one.
+     *
+     * Mutation-verified: restoring `chunked(SHORTCUT_COLUMNS)` fails this.
+     */
+    /**
+     * A backup action and its matching restore must not share an icon.
+     *
+     * `DEVICE_BACKUP` and `DEVICE_RESTORE` were both `PhoneAndroid`, so the two
+     * Home tiles that do opposite things with the device archives were
+     * indistinguishable by icon and the label was the only thing left telling
+     * them apart.
+     *
+     * Deliberately narrow. The same icon on different screens is correct and
+     * widespread — `Check` for "selected" at 17 sites, `Delete` at 9,
+     * `Restore` at 13 — and a guard that banned repeated icons would fire ~59
+     * times on healthy code. Same icon for "Automation" and "Schedules" is fine
+     * too: those differ in scope, not in direction.
+     *
+     * Direction is the thing that makes an icon carry information, so that is
+     * the only thing guarded here.
+     *
+     * Mutation-verified: putting `PhoneAndroid` back on DEVICE_RESTORE fails this.
+     */
+    /**
+     * One "there is nothing here" block, defined once.
+     *
+     * `ConfigsEmptyState` and `HistoryEmptyState` were the same `Column`, the
+     * same 96dp `Box`, the same 16dp and 4dp gaps and the same type scale,
+     * differing only in icon and tint — two private helpers in one file a screen
+     * apart. They now both delegate to `DvEmptyState`.
+     *
+     * The tint half mattered more than the copy half: one used
+     * `dvContainer(role)` / `dvAccent(role)` and the other reached for
+     * `primaryContainer.copy(alpha = 0.45f)` / `colorScheme.primary`. So one of
+     * them painted an empty state with a colour that means nothing — the same
+     * mistake as a container inheriting its content colour (invariant 61).
+     * `DvEmptyState` therefore takes a `DvRole`, and this asserts it still does,
+     * so a raw tint cannot creep back in through a new argument.
+     *
+     * It also asserts neither helper re-inlines the block, which is the shape
+     * the duplication actually took.
+     *
+     * Mutation-verified: re-inlining the `Column` fails this.
+     */
+    @Test
+    fun `the empty state is defined once and wears a role`() {
+        // `ConfigsEmptyState` and `HistoryEmptyState` were the same Column, the
+        // same 96dp Box, the same gaps and the same type scale, differing only in
+        // icon and tint - two private helpers in one file a screen apart. The
+        // tint half mattered more: one used dvContainer(role)/dvAccent(role) and
+        // the other reached for primaryContainer.copy(alpha = 0.45f) and
+        // colorScheme.primary, so one of them painted an empty state with a colour
+        // that means nothing - the same mistake as a container inheriting its
+        // content colour (invariant 61).
+        val comp = File(mainSrc, "com/phoenix/droidvault/ui/components/DvEmptyState.kt")
+        assertTrue(
+            "ui/components/DvEmptyState.kt is gone - the shared empty state was " +
+                "inlined back into two screens",
+            comp.isFile
+        )
+        val body = codeKeepLines(comp.readText())
+        assertTrue(
+            "DvEmptyState must take a DvRole, not a raw colour",
+            body.contains("role: DvRole")
+        )
+        assertTrue(
+            "DvEmptyState must paint its circle with dvContainer(role)",
+            body.contains("dvContainer(role)")
+        )
+
+        val auto = codeKeepLines(
+            File(mainSrc, "com/phoenix/droidvault/ui/screens/AutomateScreen.kt").readText()
+        )
+        val helpers = listOf("ConfigsEmptyState", "HistoryEmptyState")
+        for (fn in helpers) {
+            val span = auto.substringAfter("fun $fn(").substringBefore("\n}\n")
+            assertTrue("$fn does not delegate to DvEmptyState", span.contains("DvEmptyState("))
+            assertTrue(
+                "$fn re-inlines the empty-state block with its own .size(96.dp); " +
+                    "the duplication this replaced was two copies of exactly that",
+                !span.contains(".size(96.dp)")
+            )
+        }
+    }
+
+    /**
+     * No button may be pinned below the 48dp touch target.
+     *
+     * `IconButton` applies `minimumInteractiveComponentSize()` **before** the
+     * caller's modifier, so a later `Modifier.size(28.dp)` wins outright and the
+     * target really is 28dp. Thirteen sites did this: 28dp reorder arrows, 36dp
+     * rule rows, 40dp row-end deletes and tonal dismiss buttons. The ICON inside
+     * each was already sized separately (18-24dp), so shrinking the button bought
+     * nothing visual and cost the target.
+     *
+     * Covers interactive bare `Icon`s as well as buttons. One drag handle in
+     * this app carries `pointerInput` rather than an `onClick` and was 40dp,
+     * and a guard naming only `IconButton` cannot see it - which is this file's
+     * own rule: a guard must inspect every call site of the thing it names.
+     *
+     * Checked by parsing each call's own argument list rather than by
+     * regex over the line, for the reason this file's own history records: a
+     * line-based match misses the multi-line form and reports a clean tree that is
+     * not clean. Nested `Icon(...)` calls are stripped first so an icon's own
+     * size is never confused with the button's.
+     *
+     * Mutation-verified twice: putting `.size(28.dp)` back on a button fails it,
+     * and putting `.size(40.dp)` back on the drag handle fails it too.
+     */
+    /**
+     * An icon-only button must say what it does.
+     *
+     * `Icon(icon, null, ...)` is correct when the button also contains a `Text` —
+     * the word IS the label, and announcing it twice is worse for a screen reader.
+     * It is wrong when the icon is the button's whole content, and one such button
+     * shipped: the remove control on a Flash action row, a **destructive** action
+     * that dropped the action out of the flash order and announced nothing.
+     *
+     * The label counts whether it is written literally, positionally or as an
+     * expression — `contentDescription = contentDescription` (a parameter),
+     * `= if (expanded) "Collapse" else "Expand"`, and `Icon(icon, "Move up")` all
+     * count. The first detector matched quoted literals only and reported five
+     * labelled buttons as silent, so "no quoted string" is not the test; "no
+     * label expression of any kind" is.
+     *
+     * Mutation-verified: putting `null` back fails this.
+     */
+    /**
+     * A root-shell probe must never be reachable from the composition thread.
+     *
+     * `PermissionChecker.check` blocks on a shell engine probe with a 10s bound,
+     * and Settings' self-check calls it. It was safe only because
+     * `checkRootAccess` happens to invoke its hook on IO — while its three sibling
+     * hooks in the same file wrap in `withContext(Dispatchers.Main)`. So the one
+     * change that would have "aligned it with the others" moves a ten-second
+     * blocking probe onto the main thread, and nothing at either call site says
+     * so. This guard makes each blocking shell probe state its own hop.
+     *
+     * Mutation-verified: dropping the `withContext` from Settings' hook fails it.
+     */
+    @Test
+    fun `a blocking shell probe in the UI layer declares its own hop`() {
+        val probes = listOf("PermissionChecker.check")
+        val offenders = mutableListOf<String>()
+        for (f in mainSrc.walkTopDown().filter { it.isFile && it.extension == "kt" }) {
+            if (f.parentFile?.name != "ui" && f.parentFile?.parentFile?.name != "ui") continue
+            val lines = f.readText().split("\n")
+            lines.forEachIndexed { n, line ->
+                if (probes.none { line.contains(it) }) return@forEachIndexed
+                if (line.trimStart().startsWith("//")) return@forEachIndexed
+                // Look back over the enclosing expression for an explicit hop -
+                // and only THAT. `take(n + 1)` was the bug that made this guard
+                // enforce nothing: it took n+1 lines instead of 7, so from the
+                // first call site the window ran 150 lines down and found the
+                // `Dispatchers.IO` of the SECOND call site. Removing the hop from
+                // one probe left the other one vouching for it. A window wider
+                // than the span it means to is the same defect as the 700-char
+                // window in the label guard, and it is counted separately.
+                val window = lines.drop((n - 6).coerceAtLeast(0)).take(7).joinToString("\n")
+                if (!window.contains("Dispatchers.IO") && !window.contains("Dispatchers.Default")) {
+                    offenders += "${f.name}:${n + 1} ${line.trim().take(60)}"
+                }
+            }
+        }
+        assertTrue(
+            "a blocking root-shell probe is called with no dispatcher hop around " +
+                "it, so it runs on whichever thread the caller happened to be on: " +
+                offenders.joinToString(),
+            offenders.isEmpty()
+        )
+    }
+
+    @Test
+    fun `an icon-only button must name itself`() {
+        // `Icon(icon, null, ...)` is CORRECT when the button also contains a Text
+        // - the word is the label, and announcing it twice is worse. It is wrong
+        // when the icon is the button's entire content, and one such button
+        // shipped: the remove control on a Flash action row, a DESTRUCTIVE action
+        // that dropped the action out of the flash order and announced nothing.
+        //
+        // A label counts however it is written: a literal, positional
+        // (`Icon(icon, "Move up")`), a parameter (`contentDescription = label`)
+        // or a conditional (`= if (expanded) "Collapse" else "Expand"`). The first
+        // detector matched quoted literals only and called five labelled buttons
+        // silent, so the test is "no label expression of any kind", not "no quotes".
+        val btns = listOf(
+            "IconButton", "IconToggleButton", "FilledTonalIconButton",
+            "FilledIconButton", "OutlinedIconButton"
+        )
+        val anyIcon = Regex("""Icon\s*\((?:[^()]*|\([^()]*\))*\)""")
+        val nullDesc = Regex("""contentDescription\s*=\s*null""")
+        val namedDesc = Regex("""contentDescription\s*=\s*(?!null)\S""")
+        val positionalDesc = Regex(""",\s*"[^"]+"\s*[,)]""")
+        val offenders = mutableListOf<String>()
+
+        for (f in mainSrc.walkTopDown().filter { it.isFile && it.extension == "kt" }) {
+            val src = f.readText()
+            Regex("""\b(""" + btns.joinToString("|") + """)\s*\(""").findAll(src).forEach { m ->
+                var depth = 0
+                var i = m.range.last
+                while (i < src.length) {
+                    if (src[i] == '(') depth++
+                    if (src[i] == ')') { depth--; if (depth == 0) break }
+                    i++
+                }
+                if (i >= src.length) return@forEach
+                // The button's OWN content: the trailing lambda, matched by
+                // brace depth. A fixed character window is what this guard's
+                // first version used, and it read the NEXT row's Text( - the
+                // mutation that proved it: putting `null` back on the Flash
+                // remove button changed nothing, because 700 characters
+                // downstream is the next action row's title.
+                // Start PAST the closing paren. Starting on it means the
+                // whitespace walk never moves - `)` is not whitespace - and
+                // the region collapses to the argument list, which holds no
+                // Text and no Icon, so `icons.isNotEmpty()` is false for every
+                // button and the guard reports a clean tree having examined
+                // nothing. Caught by mutation, not by reading it.
+                var end = i + 1
+                while (end < src.length && src[end].isWhitespace()) end++
+                if (end < src.length && src[end] == '{') {
+                    var d = 0
+                    var k = end
+                    while (k < src.length) {
+                        if (src[k] == '{') d++
+                        if (src[k] == '}') { d--; if (d == 0) break }
+                        k++
+                    }
+                    end = minOf(src.length, k + 1)
+                }
+                val region = src.substring(m.range.last + 1, end)
+                val hasText = region.contains("Text(")
+                val icons = anyIcon.findAll(region).map { it.value }.toList()
+                val everyIconSilent = icons.isNotEmpty() && icons.all { ic ->
+                    val hasName = namedDesc.containsMatchIn(ic) && !nullDesc.containsMatchIn(ic)
+                    val positional = !ic.contains("contentDescription") &&
+                        positionalDesc.containsMatchIn(ic)
+                    !hasName && !positional
+                }
+                if (!hasText && everyIconSilent) {
+                    val line = src.substring(0, m.range.first).count { it == '\n' } + 1
+                    offenders += "${f.name}:$line ${m.groupValues[1]}"
+                }
+            }
+        }
+
+        assertTrue(
+            "an icon-only button has no label of any kind, so a screen reader " +
+                "hears an unnamed control: ${offenders.joinToString()}",
+            offenders.isEmpty()
+        )
+    }
+
+    @Test
+    fun `no button is pinned below the 48dp touch target`() {
+        // `IconButton` applies `minimumInteractiveComponentSize()` BEFORE the
+        // caller's modifier, so a later `Modifier.size(28.dp)` wins outright and
+        // the target really is 28dp. Thirteen sites did this: 28dp reorder arrows,
+        // 36dp rule rows, 40dp row-end deletes and tonal dismiss buttons. The
+        // Icon inside each was already sized separately (18-24dp), so shrinking the
+        // button bought nothing visual and cost the target.
+        //
+        // A bare `Icon` can be interactive too - one drag handle in this app
+        // carries `pointerInput` and is 40dp - and a guard that names only
+        // `IconButton` cannot see it. That is this file's own rule: a guard must
+        // inspect every call site of the thing it names, not one of them.
+        //
+        // Parsed by walking each call's own parentheses rather than by regex over
+        // the line, for the reason this file's history records: a line-based match
+        // misses the multi-line form and reports a clean tree that is not clean.
+        // Nested Icon(...) calls are stripped from a BUTTON's arguments first, so
+        // an icon's own size is never mistaken for the button's.
+        val buttons = listOf(
+            "IconButton", "IconToggleButton", "FilledTonalIconButton",
+            "FilledIconButton", "OutlinedIconButton", "FloatingActionButton"
+        )
+        val callStart = Regex("\\b(" + buttons.joinToString("|") + ")\\s*\\(")
+        val nestedIcon = Regex("Icon\\s*\\((?:[^()]*|\\([^()]*\\))*\\)")
+        val anySize = Regex("\\.size\\((\\d+)\\.dp\\)")
+        // An Icon is only a target when it takes input; a decorative Icon inside a
+        // button keeps its own small size on purpose.
+        val gesture = Regex("\\b(pointerInput|clickable)\\s*\\(")
+        val iconCall = Regex("\\b(Icon)\\s*\\(")
+        val targets: List<Pair<String, Boolean>> =
+            listOf(callStart.pattern to true, iconCall.pattern to false)
+        val offenders = mutableListOf<String>()
+
+        for (f in mainSrc.walkTopDown().filter { it.isFile && it.extension == "kt" }) {
+            val src = f.readText()
+            for ((pattern, isButton) in targets) {
+                for (m in Regex(pattern).findAll(src)) {
+                    var depth = 0
+                    var i = m.range.last
+                    while (i < src.length) {
+                        val c = src[i]
+                        if (c == '(') depth++
+                        if (c == ')') {
+                            depth--
+                            if (depth == 0) break
+                        }
+                        i++
+                    }
+                    if (i >= src.length) continue
+                    val raw = src.substring(m.range.last + 1, i)
+                    if (!isButton && !gesture.containsMatchIn(raw)) continue
+                    val args = if (isButton) nestedIcon.replace(raw, "") else raw
+                    for (sm in anySize.findAll(args)) {
+                        val dp = sm.groupValues[1].toInt()
+                        if (dp < 48) {
+                            val line = src.substring(0, m.range.first).count { ch -> ch == '\n' } + 1
+                            offenders += "${f.name}:$line ${m.groupValues[1]} ${dp}dp"
+                        }
+                    }
+                }
+            }
+        }
+
+        assertTrue(
+            "a button is pinned below the 48dp touch target, which overrides the " +
+                "minimum the IconButton applied for it: ${offenders.joinToString()}",
+            offenders.isEmpty()
+        )
+    }
+
+    @Test
+    fun `a backup shortcut and its matching restore never share an icon`() {
+        val src = codeKeepLines(
+            File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/ui/screens/DashboardScreen.kt")
+                .readText()
+        )
+        val map = src.substringAfter("private fun HomeShortcut.icon()")
+            .substringBefore("private fun HomeShortcut.role()")
+        val iconOf = Regex("""HomeShortcut\.(\w+)\s*->\s*Icons\.\w+\.(\w+)""")
+            .findAll(map)
+            .associate { it.groupValues[1] to it.groupValues[2] }
+        assertTrue(
+            "could not read the shortcut icon table - found ${iconOf.size} entries",
+            iconOf.size >= 10
+        )
+        val backupFamily = setOf("BACKUP_APPS", "DEVICE_BACKUP")
+        val restoreFamily = setOf("RESTORE_APPS", "DEVICE_RESTORE")
+        for (b in backupFamily) {
+            for (r in restoreFamily) {
+                val ib = iconOf[b]
+                val ir = iconOf[r]
+                assertTrue(
+                    "$b and $r share the icon '$ib' - an icon that marks DIRECTION " +
+                        "stops carrying it when both directions look the same. A tile " +
+                        "for restoring what the neighbouring tile backs up is " +
+                        "indistinguishable from it",
+                    ib != ir
+                )
+            }
+        }
+        // And the two device tiles specifically: they are the pair that shipped
+        // broken, and the one people would tap the wrong one of.
+        assertTrue(
+            "DEVICE_BACKUP and DEVICE_RESTORE are the same tile with different " +
+                "labels unless their icons differ",
+            iconOf["DEVICE_BACKUP"] != iconOf["DEVICE_RESTORE"]
+        )
+    }
+
+    @Test
+    fun `the shortcut grid derives its columns instead of declaring them`() {
+        val src = codeKeepLines(
+            File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/ui/screens/DashboardScreen.kt")
+                .readText()
+        )
+        val grid = src.substringAfter("private fun ShortcutGrid(")
+            .substringBefore("private fun ShortcutTile(")
+        assertTrue(
+            "the shortcut grid is chunked by a fixed column count again — at a 2x " +
+                "font every tile title truncates and nothing reports it",
+            !Regex("""chunked\(\s*SHORTCUT_COLUMNS""").containsMatchIn(grid) &&
+                !Regex("""chunked\(\s*\d""").containsMatchIn(grid)
+        )
+        assertTrue(
+            "the shortcut grid no longer measures its titles, so it cannot know " +
+                "whether they fit — it needs rememberTextMeasurer and a BoxWithConstraints",
+            grid.contains("rememberTextMeasurer") && grid.contains("BoxWithConstraints")
+        )
+        assertTrue(
+            "a shortcut tile title is capped at one line unconditionally — with the " +
+                "whole row to itself a tile has room to wrap, and a truncated name " +
+                "is worse than a two-line one",
+            !Regex("""item\.title,[\s\S]{0,220}?maxLines = 1,""").containsMatchIn(src)
+        )
+    }
+
+    @Test
+    fun `nav tabs are not circle-clipped`() {
+        val src = codeKeepLines(
+            File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/ui/screens/MainScreen.kt")
+                .readText()
+        )
+        // Anchored on the pill's own onSizeChanged, NOT on `tabs.forEachIndexed`:
+        // there are two of those, and the first is the landscape `NavigationRail`
+        // branch. Anchoring there put the pill's own clip inside the span and the
+        // guard failed on a correct build — the span has to be the one meant.
+        val pill = src.substringAfter("navBarHeight = with(navDensity)")
+        assertTrue(
+            "the nav pill lost its own clip(CircleShape), so it is no longer round",
+            pill.contains("clip(CircleShape)")
+        )
+        // Scoped to THIS node, and not to the whole tab subtree: the selected-tab
+        // indicator inside it is a 44x30 box whose circle is a deliberate
+        // background, not a crop of anything. The defect is text inside a box
+        // twice as wide as it is tall, and `BoxWithConstraints` appears exactly
+        // once in this file, so the span is unambiguous.
+        val tabBox = src.substringAfter("BoxWithConstraints(").substringBefore(".clickable(")
+        assertTrue(
+            "the nav tab box that holds the LABEL has a clip(CircleShape) again — " +
+                "the box is about twice as wide as it is tall, so the circle is " +
+                "sized to its HEIGHT and cuts the label's glyphs at large font " +
+                "scales. Measured on device, the label gained 3px the moment this " +
+                "clip went, and the label fitter above it had been correct all " +
+                "along. The pill has its own clip.",
+            !tabBox.contains("clip(CircleShape)")
+        )
+    }
+
+    @Test
+    fun `a rotation is linear and the token says why`() {
+        val src = codeKeepLines(
+            File(mainSrc, "com/phoenix/droidvault/ui/theme/DvMotion.kt").readText()
+        )
+        assertTrue(
+            "DvMotion.rotationEasing must be LinearEasing — the ease-in/ease-out " +
+                "hitch on a rotation is the entire reason it is a separate curve",
+            Regex("""val rotationEasing:\s*Easing\s*=\s*LinearEasing""").containsMatchIn(src)
+        )
+        assertTrue(
+            "DvMotion.rotate() must build its spec with rotationEasing",
+            src.substringAfter("fun <T> rotate(").contains("rotationEasing")
+        )
+    }
+
+    /**
+     * A loop must be able to reach a linear curve only through `rotate()`.
+     *
+     * The failure this guards is the subtle one: not a spinner that stops being
+     * linear, but a *new* loop that reaches for `LinearEasing` directly because
+     * that is how the first spinner was written. `rotationEasing` being private-
+     * by-convention is what stops that, so the raw curve is asserted not to be
+     * used anywhere in the UI.
+     */
+    @Test
+    fun `the UI does not hand-roll a linear rotation`() {
+        val ui = File(mainSrc, "com/phoenix/droidvault/ui")
+        val offenders = ui.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "DvMotion.kt" }
+            .mapNotNull { f ->
+                val text = codeKeepLines(f.readText())
+                val hit = Regex("""easing\s*=\s*LinearEasing""").find(text)
+                hit?.let { "${f.name}:${text.substring(0, hit.range.first).count { c -> c == '\n' } + 1}" }
+            }
+            .toList()
+        assertTrue(
+            "LinearEasing is reached for directly — a rotation must go through " +
+                "DvMotion.rotate(), which is where the linear-curve reason lives. " +
+                "At ${offenders.joinToString()}",
+            offenders.isEmpty()
+        )
+    }
 }

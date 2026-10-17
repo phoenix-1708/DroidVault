@@ -45,6 +45,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.phoenix.droidvault.models.AppParts
+import com.phoenix.droidvault.ui.theme.DvMotion
 
 private fun partIcon(id: Int): ImageVector = when (id) {
     AppParts.APP -> Icons.Default.Android
@@ -91,7 +92,6 @@ fun ComponentPickerCard(
                     Text(
                         if (isRestore) "What to restore" else "What to back up",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
                     )
                     Text(
                         "Default for newly selected apps",
@@ -181,20 +181,20 @@ private fun PartPill(id: Int, selected: Boolean, onClick: () -> Unit) {
     val container by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.primaryContainer
         else MaterialTheme.colorScheme.surfaceContainerHigh,
-        animationSpec = tween(180),
+        animationSpec = DvMotion.settle(),
         label = "partBg"
     )
     val content by animateColorAsState(
         targetValue = if (selected) MaterialTheme.colorScheme.onPrimaryContainer
         else MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = tween(180),
+        animationSpec = DvMotion.settle(),
         label = "partFg"
     )
     // A small pop when a part is switched on: the row is dense enough that a
     // colour change alone is easy to miss.
     val pop by animateFloatAsState(
         targetValue = if (selected) 1f else 0.94f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        animationSpec = DvMotion.Springs.overshoot(),
         label = "partPop"
     )
 
@@ -279,7 +279,6 @@ fun ComponentHelpDialog(isRestore: Boolean, onDismiss: () -> Unit) {
                             Text(
                                 AppParts.label(id),
                                 style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold
                             )
                             Text(
                                 AppParts.description(id),

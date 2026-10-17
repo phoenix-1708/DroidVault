@@ -127,4 +127,107 @@ class AccentContrastTest {
         assertTrue(abs(DvRole.Destructive.hue - DvRole.Tools.hue) >= 30f)
         assertTrue(abs(DvRole.Destructive.hue - DvRole.Storage.hue) >= 30f)
     }
+
+    /**
+     * The Live log's severity colours, on the surface they are actually read on.
+     *
+     * The accent system is checked above for ICON-ON-CONTAINER, which is a
+     * different background from the one a log line sits on: the diagnostics
+     * sheet is a `ModalBottomSheet` on `surfaceContainerHigh`, and a hue that
+     * clears 4.5:1 on a tinted container can still be unreadable on a flat
+     * surface. Adding the level filter is what put coloured text where there
+     * was grey text, so the new pairing needs its own measurement rather than
+     * an assumption that the old one transfers.
+     *
+     * Themed by hand because [com.poenix.droidvault.ui.theme.dvAccent] reads a
+     * CompositionLocal, and a unit test has none. The three pairs below are the
+     * three themes the app ships.
+     */
+    @Test
+    fun logSeverityColoursAreReadableOnTheSheetSurface() {
+        // The three roles the Live log tints by: errors, warnings, info.
+        val roles = listOf(DvRole.Error, DvRole.Warning, DvRole.Info)
+        val themes = listOf(
+            Triple("light", LightDvPalette, lightSurface),
+            Triple("dark", DarkDvPalette, darkSurface),
+            Triple("amoled", DarkDvPalette, amoledSurface)
+        )
+        for ((name, palette, surface) in themes) {
+            for (role in roles) {
+                val ratio = contrastRatio(palette.accent(role), surface)
+                assertTrue(
+                    "$name $role on the diagnostics sheet was %.2f:1, needs >= 4.5 — " +
+                        "pick a different DvRole rather than lowering the bar".format(ratio),
+                    ratio >= 4.5
+                )
+            }
+        }
+    }
+
+    /** The three severity roles must be tellable apart, not just individually legible. */
+    @Test
+    fun logSeverityRolesAreHueDistinct() {
+        val roles = listOf(DvRole.Error, DvRole.Warning, DvRole.Info)
+        for (i in roles.indices) {
+            for (j in i + 1 until roles.size) {
+                val delta = abs(roles[i].hue - roles[j].hue)
+                val distance = minOf(delta, 360f - delta)
+                assertTrue(
+                    "${roles[i]} and ${roles[j]} are only %.0f degrees apart, so a log " +
+                        "line's colour stops carrying information".format(distance),
+                    distance >= 30f
+                )
+            }
+        }
+    }
+
+    /**
+     * The Import card's status colours, on the surface that card is drawn on.
+     *
+     * A different background from the log sheet's, so it gets its own
+     * measurement rather than an assumption that the other one transfers. The
+     * card background is `surfaceContainerLow`, which is a tint of the surface
+     * rather than the surface itself.
+     *
+     * This pairing is load-bearing in a way the icon ones are not: the status
+     * label is TEXT in the accent colour, and "Complete" used to be a grey pill
+     * that read as a disabled control rather than as health. Green, amber and
+     * red are exactly the three states a reader has to tell apart at a glance.
+     */
+    @Test
+    fun transferStatusColoursAreReadableOnTheCard() {
+        val roles = listOf(DvRole.Success, DvRole.Warning, DvRole.Error)
+        val themes = listOf(
+            Triple("light", LightDvPalette, lightSurface),
+            Triple("dark", DarkDvPalette, darkSurface),
+            Triple("amoled", DarkDvPalette, amoledSurface)
+        )
+        for ((name, palette, surface) in themes) {
+            for (role in roles) {
+                val ratio = contrastRatio(palette.accent(role), surface)
+                assertTrue(
+                    "$name $role on an import card was %.2f:1, needs >= 4.5 — " +
+                        "pick a different DvRole rather than lowering the bar".format(ratio),
+                    ratio >= 4.5
+                )
+            }
+        }
+    }
+
+    /** The three states must be tellable apart, not just individually legible. */
+    @Test
+    fun transferStatusRolesAreHueDistinct() {
+        val roles = listOf(DvRole.Success, DvRole.Warning, DvRole.Error)
+        for (i in roles.indices) {
+            for (j in i + 1 until roles.size) {
+                val delta = abs(roles[i].hue - roles[j].hue)
+                val distance = minOf(delta, 360f - delta)
+                assertTrue(
+                    "${roles[i]} and ${roles[j]} are only %.0f degrees apart, so a " +
+                        "card's status stops carrying information".format(distance),
+                    distance >= 30f
+                )
+            }
+        }
+    }
 }

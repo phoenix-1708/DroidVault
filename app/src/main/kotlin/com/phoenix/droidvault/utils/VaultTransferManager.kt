@@ -59,7 +59,6 @@ object VaultTransferManager {
     const val CANCELLED = "Import cancelled"
 
     /** Slop so the copy into the vault never runs the disk to zero either. */
-    private const val IMPORT_HEADROOM_KB = 512L * 1024L
 
     /** The engine entry point every transfer command runs through. */
     private const val ENGINE = "sh /data/adb/DroidVault/DroidVault.sh"
@@ -574,7 +573,6 @@ object VaultTransferManager {
      * is a little larger than its input, and the user still needs room to use
      * the phone afterwards.
      */
-    private const val EXPORT_HEADROOM_KB = 512L * 1024L
 
     /**
      * The floor an export step is allowed before size is taken into account.
@@ -683,7 +681,7 @@ object VaultTransferManager {
             // folder and renamed there. It used to be packed into app staging and
             // copied across, which meant two gates and two budgets for one
             // result; the copy is gone, so the gate is too.
-            val needKb = VaultTransfer.exportNeedsKb(vaultKb, splitBytes > 0, EXPORT_HEADROOM_KB)
+            val needKb = VaultTransfer.exportNeedsKb(vaultKb, splitBytes > 0, VaultTransfer.EXPORT_HEADROOM_KB)
             val downloadKb = freeSpaceKb(EXPORT_DIR)
             if (downloadKb == null) {
                 Log.w(TAG, "free-space probe failed; exporting without a gate")
@@ -1243,7 +1241,7 @@ object VaultTransferManager {
             // nothing: a 34 GB import sailed through with 96 GB free against a
             // ~103 GB need.
             val freeKb = freeSpaceKb(vaultPath)
-            val needKb = VaultTransfer.importNeedsKb(unpackKb, IMPORT_HEADROOM_KB)
+            val needKb = VaultTransfer.importNeedsKb(unpackKb, VaultTransfer.IMPORT_HEADROOM_KB)
             if (freeKb == null) {
                 Log.w(TAG, "free-space probe failed; importing without a gate")
             }

@@ -1,11 +1,15 @@
 package com.phoenix.droidvault
 import com.phoenix.droidvault.utils.DroidVaultLogger
 import com.phoenix.droidvault.utils.TransferBus
+import com.phoenix.droidvault.utils.TransferLocator
 import com.phoenix.droidvault.utils.TransferOp
 import com.phoenix.droidvault.utils.TransferService
+import com.phoenix.droidvault.utils.TransferStatus
 import com.phoenix.droidvault.utils.VaultTransferManager
 import com.phoenix.droidvault.utils.VaultVerdictStore
+import com.phoenix.droidvault.models.TransferCandidate
 import com.phoenix.droidvault.models.TransferProgress
+import com.phoenix.droidvault.models.ImportSource
 import com.phoenix.droidvault.models.VaultTransfer
 import android.widget.Toast
 import com.phoenix.droidvault.ui.safeToast
@@ -34,6 +38,8 @@ import androidx.lifecycle.viewModelScope
 import com.phoenix.droidvault.models.AppInfo
 import com.phoenix.droidvault.models.AppInstallInfo
 import com.phoenix.droidvault.models.AppState
+import com.phoenix.droidvault.models.DeviceArchiveRead
+import com.phoenix.droidvault.models.DeviceDataItem
 import com.phoenix.droidvault.models.RootState
 import com.phoenix.droidvault.models.classifyRoot
 import com.phoenix.droidvault.models.AppParts
@@ -69,6 +75,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -214,18 +222,86 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 com.phoenix.droidvault.utils.AutomationStore
                     .autoImportStateFromFile(getApplication(), _savedPath.value)
             }.onFailure {
-                android.util.Log.w("MainViewModel", "automation state recovery skipped", it)
+                DroidVaultLogger.w(
+                    "Automation",
+                    "automation state recovery skipped: ${it.javaClass.simpleName}: ${it.message}"
+                )
             }
         }
     }
 
-    private val _availableDeviceBackups = MutableStateFlow<Set<String>>(emptySet())
-    val availableDeviceBackups: StateFlow<Set<String>> = _availableDeviceBackups.asStateFlow()
+    /**
+     * Every device archive, with size and mtime, as read from the vault folder.
+     *
+     * This is the single read. [availableDeviceBackups] — which the Home card,
+     * the erase dialog and the folder-archive row have always used — is derived
+     * from it rather than being a second `ls` of the same directory, because two
+     * reads of one fact is two answers waiting to disagree, and they are read at
+     * different moments.
+     */
+    private val _deviceArchives =
+        MutableStateFlow<DeviceArchiveRead>(DeviceArchiveRead.Unreadable("Not read yet"))
+    val deviceArchives: StateFlow<DeviceArchiveRead> = _deviceArchives.asStateFlow()
 
+    /**
+     * The archive FILE NAMES present in `Device/`, which is what the erase
+     * dialog's `Folders.shift` check and the Home card ask for.
+     *
+     * Derived, so it cannot disagree with [deviceArchives] about whether a file
+     * is there. It was a separate `ls` before, and a screen reading both could
+     * show "Folders backed up" beside a folder archive it could not find.
+     *
+     * An unreadable folder answers "no file here", which is the right answer for
+     * a PREDICATE — the erase dialog is asking whether to offer a row, and
+     * offering nothing on a folder it could not read is the safe direction. It
+     * is the wrong answer for a REPORT, which is why the Manage card reads
+     * [deviceArchives] and not this.
+     */
+    val availableDeviceBackups: StateFlow<Set<String>> =
+        _deviceArchives
+            .map { read ->
+                read.archivesOrEmpty().filter { it.present }.map { it.item.archiveFile }.toSet()
+            }
+            .stateIn(
+                viewModelScope,
+                kotlinx.coroutines.flow.SharingStarted.Eagerly,
+                emptySet()
+            )
+
+    /**
+     * Re-read the device archives.
+     *
+     * The name is kept because four call sites and three other screens already
+     * use it, and renaming it would spread a refactor through Migrate, Home and
+     * the trash paths for no gain. What changed is what it reads.
+     *
+     * The failure is a STATE, not an empty list. `readDeviceArchives` calls
+     * `ShellQuote.requireAbsPath`, which THROWS on a vault path that is no
+     * longer absolute, and the original `getOrDefault(emptyList())` turned that
+     * into a Manage card reading "0 of 7 backed up" — the app asserting as fact
+     * that a user has no device backups, because it could not open the folder.
+     * That is invariant 16 (absence is not failure) in its worst form: a
+     * confident, destructive-sounding claim about data the user cannot check
+     * without going into Settings. A folder that cannot be read is now
+     * [DeviceArchiveRead.Unreadable], the card says so, and the reason goes to
+     * the diagnostics log so the report is answerable.
+     */
     fun refreshDeviceBackups() {
         viewModelScope.launch(Dispatchers.IO) {
-            val backups = DeviceManager.getAvailableBackups(_savedPath.value)
-            _availableDeviceBackups.value = backups
+            val saved = _savedPath.value
+            _deviceArchives.value = try {
+                DeviceArchiveRead.Ok(DeviceManager.readDeviceArchives(saved))
+            } catch (t: Throwable) {
+                // Deliberately Throwable: the failure modes here are
+                // IllegalArgumentException from `requireAbsPath` and a
+                // SecurityException from a vanished volume. Neither should
+                // escape into a coroutine, and the screen degrades to "could
+                // not read" either way, so there is nothing for it to crash on.
+                val reason = t.message?.takeIf { it.isNotBlank() }
+                    ?: t.javaClass.simpleName
+                DroidVaultLogger.w("DeviceData", "read failed for $saved: $reason")
+                DeviceArchiveRead.Unreadable(reason)
+            }
         }
     }
 
@@ -531,7 +607,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit { putInt("theme_mode", mode) }
     }
 
-    private val _dynamicColor = MutableStateFlow(prefs.getBoolean("dynamic_color", true))
+    /**
+     * Dynamic colour is OFF unless the user turns it on.
+     *
+     * The default was `true`, so every install inherited the wallpaper's palette
+     * — including the eight `DvRole` accents, which are contrast-tested against
+     * Droid Vault's own surfaces. On a pastel wallpaper a "success" green drops
+     * below the 4.5:1 body-text ratio, so a state that is supposed to read as
+     * safe can read as a faint smudge, and the app's accent system stops being
+     * one thing. Dynamic colour is a good opt-in and a bad identity: it makes the
+     * same screen a different colour on every device.
+     *
+     * The key was already written by `setDynamicColor`, so existing installs
+     * keep whatever they chose — only a fresh install sees the new default.
+     */
+    private val _dynamicColor = MutableStateFlow(prefs.getBoolean("dynamic_color", false))
     val dynamicColor: StateFlow<Boolean> = _dynamicColor.asStateFlow()
 
     fun setDynamicColor(enabled: Boolean) {
@@ -997,6 +1087,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // the hook is what clears the caller's busy flag, so a denial that
             // never invoked it left Settings' "Re-grant" button permanently
             // disabled and its permission rows on a permanent spinner.
+            //
+            // Invoked on IO, NOT Main — deliberately, and unlike the three sibling
+            // hooks above which wrap in `withContext(Dispatchers.Main)`. Do not
+            // "align" this one: Settings' hook runs a root-shell engine probe with
+            // a 10s bound, and moving it to Main puts that probe on the
+            // composition thread. The Settings call site makes its own hop, so
+            // correctness there does not depend on this dispatcher's accident
+            // (§2.89).
             onDone?.invoke(isRooted)
         }
     }
@@ -2435,7 +2533,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             "$moved moved to trash; $failures could not be deleted"
                         moved == 0 -> "Nothing to delete"
                         else ->
-                            "$moved item(s) moved to trash — recoverable for 7 days"
+                            // "1 item(s) moved to trash" — and a per-item delete
+                            // from the Manage card makes one item the ORDINARY
+                            // case rather than the exception.
+                            AppParts.count(moved, "item") +
+                                " moved to trash — recoverable for 7 days"
                     },
                     Toast.LENGTH_SHORT
                 )
@@ -2582,6 +2684,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             MigratorMode.MANAGE -> {
                 MigratorManager.clearCache(); fetchAppsList("AllBackups")
                 refreshFolderArchive()
+                // Arriving is the request to look. `refreshCurrentList()` also
+                // reads this, but pull-to-refresh and post-operation refreshes
+                // are the SECOND time — without this the Exports card was empty
+                // on the first visit and only filled in after the user had been
+                // to the Import page, which is a behaviour that depends on
+                // navigation and so reads as randomness (invariant 21).
+                refreshTransfers()
+                // And the device archives, for the same reason and with the same
+                // consequence: the Device data card was a permanent "0 of 7
+                // backed up" on the one screen whose job is answering what is in
+                // the vault. The Home card is the only other reader, and it is a
+                // different tab.
+                refreshDeviceBackups()
             }
 
             MigratorMode.SYSTEMIZE -> fetchAppsList("AllInstalled")
@@ -2951,7 +3066,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             MigratorManager.restoreTrashBatch(getApplication(), _savedPath.value, batchId)
                 .onSuccess { restored ->
                     getApplication<Application>().safeToast(
-                        if (restored > 0) "Recovered $restored backup(s)"
+                        // "Recovered 1 backup(s)" — the (s) shorthand is the thing
+                        // six other plural rules in this app got wrong, and a
+                        // restore of a single export is the ordinary case.
+                        if (restored > 0) "Recovered ${AppParts.count(restored, "backup")}"
                         else "Nothing could be recovered",
                         Toast.LENGTH_LONG
                     )
@@ -2962,6 +3080,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // The app list reads the vault tree, so it is now stale either way.
             MigratorManager.clearCache()
             refreshTrash()
+            // And so is whatever ELSE the batch put back. A batch of exports is
+            // restored into `Download/DroidVault`, and the Exports card was
+            // showing one export while the disk held two — the §2.58 rule, which
+            // is "anything that writes re-reads the list its own screen is
+            // showing", applied to a list that is not the app list at all.
+            // `refreshCurrentList()` re-reads per the current mode, and its
+            // MANAGE branch is where the Exports card lives.
+            refreshCurrentList()
         }
     }
 
@@ -3044,13 +3170,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (!status.running) return@collect
                 _isExporting.value = status.op == TransferOp.EXPORT
                 _isImporting.value = status.op == TransferOp.IMPORT
+                // The Import page's own copy. Set here rather than collected
+                // separately so the page can never show a different transfer
+                // than the panel does.
+                _transferStatus.value = status
+                if (_transferStartedMs.value == 0L) {
+                    _transferStartedMs.value = System.currentTimeMillis()
+                }
+                // One sample per report, pruned to a few windows. The figure is the same
+                // `percent` the panel shows — monotonic, and measured against a
+                // real total — so the estimate can never be derived from a number
+                // the user is not also being shown.
+                val now = System.currentTimeMillis()
+                val kept = (_transferSamples.value + TransferProgress.Estimate.Sample(now, status.percent))
+                    .filter { now - it.atMs <= TransferProgress.Estimate.RATE_WINDOW_MS * 3 }
+                _transferSamples.value = kept
                 _uiState.update {
                     it.copy(
                         isRunning = true,
                         currentAction = if (status.op == TransferOp.IMPORT) {
-                            "Importing..."
+                            // The phase when the run has reported one, so the
+                            // bottom panel says which stage it is in rather than
+                            // the same word for twenty minutes.
+                            status.phaseLabel.ifBlank { "Importing..." }
                         } else {
-                            "Exporting..."
+                            status.phaseLabel.ifBlank { "Exporting..." }
                         },
                         currentStep = status.detail,
                         progress = status.percent
@@ -3063,6 +3207,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _exportCancel.set(false)
                 _isExporting.value = false
                 _isImporting.value = false
+                // The page's own progress strip has to be torn down too, or a
+                // finished import leaves a 100% bar pinned over the list forever.
+                // Same reason the panel's terminal state is explicit.
+                _transferStatus.value = TransferStatus()
+                _transferStartedMs.value = 0L
+                _transferSamples.value = emptyList()
                 _uiState.update {
                     it.copy(
                         isRunning = false,
@@ -3082,10 +3232,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 when (result) {
                     // An import owes the UI more than a toast: the summary, the
                     // refreshes and the configuration prompt.
-                    is VaultTransferManager.Result.Imported ->
+                    is VaultTransferManager.Result.Imported -> {
+                        // The run's own verdict, written down. §2.57 measured an
+                        // import that extracted all 482,592,475 bytes and then
+                        // reported "Import cancelled" — the engine logged
+                        // CANCELLED, the UI said cancelled, and neither line said
+                        // how much had actually landed, so the two could be
+                        // compared but never reconciled. This is the app's half of
+                        // that pair, and the `failed` list is the part that turns
+                        // "it worked" into something a report can argue with.
+                        val o = result.outcome
+                        DroidVaultLogger.i(
+                            "Transfer",
+                            "import finished from ${result.path}: " +
+                                "${o.addedCount} added, ${o.replaced.size} replaced, " +
+                                "${o.keptExisting.size} kept, ${o.failed.size} failed" +
+                                if (o.failed.isNotEmpty()) " (${o.failed.joinToString(", ")})"
+                                else ""
+                        )
                         finishImport(getApplication<Application>(), result)
+                    }
 
-                    is VaultTransferManager.Result.Exported -> getApplication<Application>()
+                    is VaultTransferManager.Result.Exported -> {
+                        DroidVaultLogger.i(
+                            "Transfer",
+                            "export finished to ${result.path}: " +
+                                "${AppParts.count(result.appCount, "backup")} in " +
+                                "${AppParts.count(result.partCount, "part")}, " +
+                                "${result.bytesKb} KB"
+                        )
+                        getApplication<Application>()
                         .safeToast(
                             run {
                                 val apps = AppParts.count(result.appCount, "backup")
@@ -3098,16 +3274,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             },
                             Toast.LENGTH_LONG
                         )
+                    }
 
-                    is VaultTransferManager.Result.Failed -> getApplication<Application>()
+                    is VaultTransferManager.Result.Failed -> {
+                        // A refusal and a crash land in the same branch, and they
+                        // are not the same thing. The space gate refusing a 32 GB
+                        // import on a phone with 31 GB free is correct behaviour
+                        // and must read as a decision somebody can act on, not as
+                        // an error — so it is logged at W with its reason, and
+                        // only a reason that is not a known refusal is an error.
+                        val reason = result.reason
+                        val refusal = reason == VaultTransferManager.CANCELLED ||
+                            reason.contains("Not enough", ignoreCase = true) ||
+                            reason.contains("free", ignoreCase = true)
+                        if (refusal) {
+                            DroidVaultLogger.w("Transfer", "transfer refused: $reason")
+                        } else {
+                            DroidVaultLogger.e("Transfer", "transfer failed: $reason")
+                        }
+                        getApplication<Application>()
                         .safeToast(
-                            if (result.reason == VaultTransferManager.CANCELLED) {
+                            if (reason == VaultTransferManager.CANCELLED) {
                                 "Transfer cancelled"
                             } else {
-                                "Transfer failed: ${result.reason}"
+                                "Transfer failed: $reason"
                             },
                             Toast.LENGTH_LONG
                         )
+                    }
                 }
                 if (result is VaultTransferManager.Result.Exported) {
                     MigratorManager.clearCache()
@@ -3136,7 +3330,207 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * staged copy is unavoidable — but it belongs on IO with progress, not on the
      * UI thread.
      */
+    /**
+     * A picked file, resolved to something the confirmation can describe.
+     *
+     * [source] is null when the pick cannot become an import at all — the caller
+     * says so in [reason]. [localPath] is non-null when the file is already
+     * readable as a path, which is the case that avoids a 34 GB copy.
+     */
+    private data class PickedTransfer(
+        val source: ImportSource?,
+        val reason: String?,
+        val localPath: String?,
+        val uri: android.net.Uri,
+        val replace: Boolean
+    )
+
+    /**
+     * A file picked through the system picker, held until it is confirmed.
+     *
+     * The SAF path used to start the import itself. That is the same
+     * multi-minute, tens-of-gigabytes write the listed path now asks about
+     * first, so a confirmation on the list and none on the picker is the gate
+     * existing only where a list happened to be — and the picker is the way
+     * someone imports a transfer this phone has never seen. Held on the
+     * ViewModel rather than in a composable so the resolution survives the
+     * Activity being recreated while the sheet is up.
+     */
+    private val _pendingPick = MutableStateFlow<PickedTransfer?>(null)
+
+    /**
+     * What the picked file is, for the confirmation sheet — and ONLY that.
+     *
+     * Deliberately not the holder: the resolved local path and the `replace`
+     * flag are the import's business, and a public property cannot leak a
+     * private type. The sheet needs a description; the run needs the rest.
+     */
+    val pendingPickSource: StateFlow<ImportSource?> =
+        _pendingPick.map { it?.source }.stateIn(
+            viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, null
+        )
+
+    /**
+     * Work out what a picked file IS, without importing it.
+     *
+     * Cheap and read-only by construction: the provider is asked for a size and
+     * a name, and the local path is resolved with the same `resolveLocalTransfer`
+     * the import already used. **Nothing is copied and nothing is written** —
+     * the 34 GB copy out of a cloud document happens only after the confirmation
+     * is accepted, because a sheet that says "this will copy 34 GB first" has to
+     * know that before it says it.
+     *
+     * A failure returns a reason rather than an empty source, so the caller can
+     * refuse honestly instead of showing a sheet with nothing in it.
+     */
+    private suspend fun resolvePickedTransfer(
+        context: Context,
+        uri: android.net.Uri,
+        replace: Boolean
+    ): PickedTransfer {
+        val local = resolveLocalTransfer(context, uri)
+        if (local != null) {
+            val name = java.io.File(local).name
+            if (VaultTransfer.isPartName(name)) {
+                // A piece names its set; the siblings are found beside it. The
+                // count comes from the manifest when there is one, which is the
+                // only way to say how many SHOULD be here.
+                val dir = java.io.File(local).parentFile
+                val prefix = VaultTransfer.splitPrefix(name) ?: name
+                val manifest = dir
+                    ?.listFiles { f -> f.name == "$prefix.parts.json" }
+                    ?.firstOrNull()
+                val expected = manifest?.let {
+                    runCatching {
+                        org.json.JSONObject(it.readText()).optInt("parts", 0)
+                    }.getOrNull()?.takeIf { n -> n > 0 }
+                }
+                val here = dir?.listFiles { f ->
+                    VaultTransfer.isPartName(f.name) && VaultTransfer.splitPrefix(f.name) == prefix
+                }?.size ?: 1
+                return PickedTransfer(
+                    source = ImportSource(
+                        from = dir?.absolutePath ?: local,
+                        totalBytes = manifest?.let { runCatching { it.length() }.getOrNull() } ?: 0L,
+                        isSplit = true,
+                        piecesHere = here,
+                        piecesExpected = expected ?: here,
+                        piecesMissing = ((expected ?: here) - here).coerceAtLeast(0),
+                        stagedFirst = null
+                    ),
+                    reason = null,
+                    localPath = local,
+                    uri = uri,
+                    replace = replace
+                )
+            }
+            val bytes = shellFileSize(local).coerceAtLeast(0L)
+            return PickedTransfer(
+                source = ImportSource(
+                    from = local,
+                    totalBytes = bytes,
+                    isSplit = false,
+                    piecesHere = 1,
+                    piecesExpected = 1,
+                    piecesMissing = 0,
+                    stagedFirst = null
+                ),
+                reason = null,
+                localPath = local,
+                uri = uri,
+                replace = replace
+            )
+        }
+
+        // Not readable as a path — a cloud document, or anything else the
+        // resolver could not map. A lone piece can never be imported: its
+        // siblings are unreachable through one SAF handle.
+        val pickedName = uri.lastPathSegment?.substringAfterLast('/') ?: ""
+        if (VaultTransfer.isPartName(pickedName)) {
+            return PickedTransfer(
+                source = null,
+                reason = "That is one piece of a split transfer, and the rest are " +
+                    "not on this phone. Copy every .part file and the .parts.json " +
+                    "file into Downloads/DroidVault first.",
+                localPath = null,
+                uri = uri,
+                replace = replace
+            )
+        }
+
+        // Ask the provider how big it is BEFORE copying it. A sheet that cannot
+        // state the size is a sheet asking someone to agree to an unknown.
+        val bytes = runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
+        }.getOrNull()?.takeIf { it > 0 } ?: 0L
+        return PickedTransfer(
+            source = ImportSource(
+                from = pickedName.ifBlank { "the file you picked" },
+                totalBytes = bytes,
+                isSplit = false,
+                piecesHere = 1,
+                piecesExpected = 1,
+                piecesMissing = 0,
+                stagedFirst = "Not on this phone yet, so it is copied into app " +
+                    "storage first — that needs room for it a second time."
+            ),
+            reason = null,
+            localPath = null,
+            uri = uri,
+            replace = replace
+        )
+    }
+
+    /**
+     * The SAF entry point: resolve the pick and ASK, rather than importing.
+     *
+     * The import itself is [runPickedImport], which is only reached once the
+     * confirmation is accepted. Everything expensive happens there.
+     */
     fun importVaultFromUri(context: Context, uri: android.net.Uri, replace: Boolean = false) {
+        if (_uiState.value.isRunning || TransferBus.isRunning) {
+            context.safeToast("Wait for the current operation to finish.", Toast.LENGTH_SHORT)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val picked = resolvePickedTransfer(context, uri, replace)
+            if (picked.source == null) {
+                withContext(Dispatchers.Main) {
+                    _uiState.update {
+                        it.copy(
+                            isRunning = false,
+                            currentAction = "Import failed",
+                            currentStep = "",
+                            progress = 100
+                        )
+                    }
+                    _isImporting.value = false
+                    context.safeToast(
+                        picked.reason ?: "That file cannot be imported.",
+                        Toast.LENGTH_LONG
+                    )
+                }
+                return@launch
+            }
+            _pendingPick.value = picked
+        }
+    }
+
+    /** Dismiss the confirmation for a picked file without importing it. */
+    fun dismissPendingPick() {
+        _pendingPick.value = null
+    }
+
+    /**
+     * Run the import the confirmation sheet just described.
+     *
+     * This is where the work starts, and it is unchanged: the local path is
+     * read where it already is, and anything else is streamed out of the
+     * provider into `filesDir` first, with progress, before the import begins.
+     */
+    fun runPickedImport(context: Context) {
+        val picked = _pendingPick.value ?: return
+        _pendingPick.value = null
         _importCancel.set(false)
         _isImporting.value = true
         if (_uiState.value.isRunning) {
@@ -3152,30 +3546,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         viewModelScope.launch(Dispatchers.IO) {
-            // Read the picked file where it already is.
-            //
-            // A `content://` URI is not a path, which is why this whole block
-            // existed: the archive was copied out of Downloads into app storage
-            // before anything could touch it. But root reads
-            // /storage/emulated/0/Download directly — verified, gzip magic and
-            // all — and the document id for local storage is exactly
-            // "primary:Download/<name>", which maps onto that path. So for a file
-            // that is already on the phone, 34 GB of reading and 34 GB of writing
-            // are pure waste.
-            //
-            // Only ever SKIPPED when the resolved path exists AND its size matches
-            // what the provider said, so a cloud document that happens to share a
-            // name cannot be mistaken for a local file. Anything else falls
-            // through to the copy below, unchanged.
-            val local = resolveLocalTransfer(context, uri)
-            Log.i("VaultTransfer", "resolveLocalTransfer(${uri.scheme}) -> $local")
+            val local = picked.localPath
             if (local != null) {
-                // One tap selects one piece; the rest are found beside it. The
-                // picker returns a single document and cannot enumerate a
-                // directory, so the siblings are resolved by name — which is
-                // why pieces carry fixed-length ordered suffixes.
                 if (VaultTransfer.isPartName(java.io.File(local).name)) {
-                    importVaultFromParts(context, local, replace)
+                    importVaultFromParts(context, local, picked.replace)
                     return@launch
                 }
                 _uiState.update {
@@ -3184,94 +3558,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         progress = -1
                     )
                 }
-                importVaultFrom(context, local, replace, alreadyStaged = true)
-                return@launch
-            }
-            // A piece that is NOT on this phone (a cloud document, or anything
-            // else the resolver could not map to a path) cannot be imported:
-            // its siblings are unreachable through a single SAF handle, and a
-            // lone piece is never a usable transfer.
-            val pickedName = uri.lastPathSegment?.substringAfterLast('/') ?: ""
-            if (VaultTransfer.isPartName(pickedName)) {
-                withContext(Dispatchers.Main) {
-                    _uiState.update {
-                        it.copy(
-                            isRunning = false,
-                            currentAction = "Import failed",
-                            currentStep = "",
-                            progress = 100
-                        )
-                    }
-                    _isImporting.value = false
-                    context.safeToast(
-                        "That is one piece of a split transfer, and the rest are " +
-                            "not on this phone. Copy every .part file and the " +
-                            ".parts.json file into Downloads/DroidVault first.",
-                        Toast.LENGTH_LONG
-                    )
-                }
+                importVaultFrom(context, local, picked.replace, alreadyStaged = true)
                 return@launch
             }
             val dest = runCatching {
-                val original = uri.lastPathSegment?.substringAfterLast('/')
-                    ?.takeIf { VaultTransfer.looksLikeTransferFile(it) }
-                    ?: uri.lastPathSegment?.substringAfterLast('/')
+                val original = uriName(picked.uri)
                 val name = original
                     ?.map { c -> if (c.isLetterOrDigit() || c == '.' || c == '-' || c == '_') c else '_' }
                     ?.joinToString("")
                     ?.takeIf { VaultTransfer.looksLikeTransferFile(it) }
                     ?: "import.${VaultTransfer.EXTENSION}"
                 // filesDir, NOT cacheDir. Cache is EVICTABLE: the system deletes
-                // app cache under pressure, and it demonstrably deleted this
-                // 3.72 GB staged copy between the copy finishing and the import
-                // reading it — so the import failed with "Could not read that
-                // file" on a file the user had just watched finish copying, with
-                // no reason given. `filesDir` is app-private and persistent.
+                // app cache under pressure, and it demonstrably deleted a 3.72 GB
+                // staged copy between the copy finishing and the import reading
+                // it — so the import failed with "Could not read that file" on a
+                // file the user had just watched finish copying, with no reason
+                // given. `filesDir` is app-private and persistent.
                 val dir = java.io.File(context.filesDir, "transfer").apply { mkdirs() }
                 val file = java.io.File(dir, name)
-                val total = runCatching {
-                    context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize }
-                }.getOrNull()?.takeIf { it > 0 } ?: 0L
-
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    file.outputStream().use { output ->
-                        val buffer = ByteArray(1 shl 20)
+                context.contentResolver.openInputStream(picked.uri)?.use { input ->
+                    file.outputStream().use { out ->
+                        val buf = ByteArray(256 * 1024)
                         var copied = 0L
-                        var last = 0
+                        val total = runCatching {
+                            context.contentResolver.openFileDescriptor(picked.uri, "r")
+                                ?.use { it.statSize }
+                        }.getOrNull()?.takeIf { it > 0 } ?: 0L
                         var lastShown = 0L
                         while (true) {
-                            val n = input.read(buffer)
+                            if (_importCancel.get()) {
+                                runCatching { input.close() }
+                                file.delete()
+                                break
+                            }
+                            val n = input.read(buf)
                             if (n <= 0) break
-                            output.write(buffer, 0, n)
+                            out.write(buf, 0, n)
                             copied += n
-                            // Push on a BYTE change, not a percentage change.
-                            // The percentage is deliberately capped at 99 until the
-                            // work is confirmed finished, so gating the label on it
-                            // meant the label froze at 33.6 GB for six minutes while
-                            // the copy finished the rest and sat at 99%. The number
-                            // on screen stopped being true about work still running.
                             if (copied - lastShown >= BYTE_STEP) {
                                 lastShown = copied
-                                val pct = TransferProgress.percent(copied, total, finished = false, last = last)
-                                last = pct
                                 _uiState.update {
                                     it.copy(
-                                        currentStep = "Copying the file to a place this app can read " +
+                                        currentStep = "Copying the file here " +
                                             "(${TransferProgress.sizeLabel(copied, total)})",
-                                        progress = pct
+                                        progress = -1
                                     )
                                 }
                             }
-                            if (_importCancel.get()) {
-                                runCatching { input.close() }
-                                throw java.io.IOException("cancelled")
                         }
-                            }
                     }
                 } ?: return@runCatching null
                 file
             }.getOrNull()
-
             if (dest == null) {
                 withContext(Dispatchers.Main) {
                     _uiState.update {
@@ -3282,36 +3620,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             progress = 100
                         )
                     }
+                    _isImporting.value = false
                     context.safeToast("Could not read that file", Toast.LENGTH_LONG)
                 }
                 return@launch
             }
             importVaultFrom(
-                context, dest.absolutePath, replace,
+                context, dest.absolutePath, picked.replace,
                 alreadyStaged = true, stagedCopy = dest
             )
         }
     }
 
-    /**
-     * [alreadyStaged] when the caller has just copied it, so no state is set twice.
-     *
-     * [stagedCopy] is the app-private copy of the picked file. It is deleted when
-     * the import ends, whatever the outcome. It used to be left behind: a 3.72 GB
-     * transfer sat in app storage forever after every import. The copy only ever
-     * disappeared because it lived in `cacheDir` and Android reclaimed it — the
-     * very eviction that broke the import. Moving it to `filesDir` to survive
-     * eviction would have turned a transient bug into a permanent 3.72 GB leak.
-     */
-    /**
-     * Import from one piece of a split transfer.
-     *
-     * The picked piece names the set: its siblings share the directory and the
-     * prefix, and `<prefix>.parts.json` records how many there are and what
-     * they must add up to. Everything is verified BEFORE the import starts —
-     * count, per-piece sizes, byte sum — because a set that looks complete but
-     * is short writes a truncated vault that reports success.
-     */
+    /** The file name a SAF uri ends in, or null when it has none. */
+    private fun uriName(uri: android.net.Uri): String? =
+        uri.lastPathSegment?.substringAfterLast('/')
+
     private fun importVaultFromParts(context: Context, pickedPath: String, replace: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
             val fail = { reason: String ->
@@ -3410,6 +3734,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // does: viewModelScope dies with the Activity, and an import is the
         // longest thing this app does. Everything after it — the message, the
         // refreshes, the configuration prompt — happens in finishImport().
+        //
+        // The START is logged here, before the service is handed the work, and
+        // not in the service: the engine's own `ACTION:` lines say what the
+        // engine is doing but never what was asked of it, so a log full of
+        // `EXTRACT` lines could not distinguish a 482 MB import from a 34 GB one,
+        // nor a split import from a single file. A run with no start line and a
+        // CANCELLED line is the §2.57 shape, where the two halves could be
+        // compared but not reconciled.
+        DroidVaultLogger.i(
+            "Transfer",
+            "import starting from $archivePath: " +
+                (if (sourceParts.isEmpty()) "single file"
+                else "${AppParts.count(sourceParts.size, "part")}") +
+                ", merge=${if (replace) "REPLACE" else "KEEP_DESTINATION"}"
+        )
         TransferService.startImport(
             context,
             _savedPath.value,
@@ -3742,6 +4081,261 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** True while an import is running, so the sheet can offer Cancel. */
     val isImporting: StateFlow<Boolean> = _isImporting.asStateFlow()
+
+    // ---------- Import screen: the exports this phone already holds ----------
+
+    private val _transferCandidates = MutableStateFlow<List<TransferCandidate>>(emptyList())
+    val transferCandidates: StateFlow<List<TransferCandidate>> = _transferCandidates.asStateFlow()
+
+    /**
+     * Free space on the filesystem an export writes to, in KB.
+     *
+     * **A different filesystem from the vault on most phones**, so the number
+     * `overview.storage.freeBytes` carries cannot answer the export sheet's
+     * question — that is the export GATE's figure, and it is measured on
+     * [VaultTransfer.EXPORT_DIR]. Null means not measured, and the sheet omits
+     * the row rather than rendering zero: a failed probe shown as "0 GB free"
+     * would be §2.79 with the volume turned down, and this is the same class of
+     * claim.
+     *
+     * Read fresh whenever the sheet opens, because free space is the one figure
+     * on it that goes stale between launches, and a sheet quoting a number from
+     * startup is a sheet quoting the wrong number by the time you need it.
+     */
+    private val _exportFreeKb = MutableStateFlow<Long?>(null)
+    val exportFreeKb: StateFlow<Long?> = _exportFreeKb.asStateFlow()
+
+    /** Refresh the export destination's free space. Cheap: one shell `df`. */
+    fun refreshExportFreeSpace() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _exportFreeKb.value =
+                com.phoenix.droidvault.utils.AutomationSafety.freeSpaceKb(VaultTransfer.EXPORT_DIR)
+        }
+    }
+
+    /**
+     * The folder the NEXT export will be written to, for the confirmation sheet.
+     *
+     * A prediction, and labelled as one by the sheet's own wording — the real
+     * name is minted when the export runs, and a collision appends `-2`. It only
+     * has to be right often enough to be useful ("about here, in a folder of
+     * today's date"), because the alternative was the sheet naming no
+     * destination at all, which is the question the sheet exists to answer.
+     */
+    fun nextExportDir(): String =
+        VaultTransfer.exportBatchDir(VaultTransfer.exportBatchName(System.currentTimeMillis()))
+
+    private val _transfersScanning = MutableStateFlow(false)
+
+    /** True while the listing is being read, so the page is not a blank frame. */
+    val transfersScanning: StateFlow<Boolean> = _transfersScanning.asStateFlow()
+
+    /**
+     * The transfer in flight, as the Import page reads it.
+     *
+     * The page cannot use `uiState` for this. That flow is the per-tick one the
+     * shell uses, and `MigratorActionScreen` deliberately confines its high
+     * frequency to the one panel that renders it; a screen whose whole content
+     * is a list of files should not recompose on every progress tick just to
+     * show a header strip.
+     */
+    private val _transferStatus = MutableStateFlow(TransferStatus())
+    val transferStatus: StateFlow<TransferStatus> = _transferStatus.asStateFlow()
+
+    /**
+     * When the current transfer started, for "11 min elapsed".
+     *
+     * Held here rather than in the screen: the screen can be recreated (a
+     * rotation, a process restart with the service still running) and an
+     * elapsed clock that resets on recreation would report a run that has been
+     * going for twenty minutes as having just begun.
+     */
+    private val _transferStartedMs = MutableStateFlow(0L)
+    val transferStartedMs: StateFlow<Long> = _transferStartedMs.asStateFlow()
+
+    /**
+     * Real byte samples, for the rate the estimate is derived from.
+     *
+     * Kept as a short trailing window rather than two counters, because the
+     * whole point of [VaultTransfer.Estimate] is to measure over a span long
+     * enough to survive one app's install. `report()` can be called many times
+     * a second, so this is capped and pruned by time, not by count.
+     */
+    private val _transferSamples = MutableStateFlow<List<TransferProgress.Estimate.Sample>>(emptyList())
+    val transferSamples: StateFlow<List<TransferProgress.Estimate.Sample>> =
+        _transferSamples.asStateFlow()
+
+    /**
+     * Re-read the export folders.
+     *
+     * Not automatic. An import page that refreshes itself would move rows out
+     * from under a finger mid-tap, and a scan is a privileged shell round trip
+     * — the user asks for it by arriving or by pulling to refresh.
+     *
+     * A failure is not an error state: it lands as an empty list, which the page
+     * renders as its empty state with the system picker still offered. A listing
+     * that cannot be read must never be a dead end.
+     */
+    fun refreshTransfers() {
+        if (_transfersScanning.value) return
+        _transfersScanning.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            val found = TransferLocator.discover()
+            _transferCandidates.value = found
+            _transfersScanning.value = false
+        }
+    }
+
+    /**
+     * Delete an export from the phone, through the recoverable trash.
+     *
+     * Not `rm`. An export is a copy of the user's vault that may exist nowhere
+     * else — an old phone's only backup, made precisely so the phone could be
+     * wiped — so erasing it is the one irreversible action in this screen, and
+     * it does not have to be. The vault and `Download/` are on the same
+     * filesystem (measured: device id 163 on both, on the reference phone), so
+     * `mv` into `<vault>/.trash` is a rename, not a copy: instant, and
+     * undoable for seven days through the same card that already covers every
+     * other deletion.
+     *
+     * That is a stronger promise than the confirm dialog originally planned,
+     * and it is the reason there is no "this cannot be brought back" warning
+     * here: there is nothing irreversible to warn about. The trash card is the
+     * warning, and it appears once the delete lands.
+     *
+     * Holds the run gate for the same reason [deleteDeviceBackups] does: an
+     * import reads this very folder, and deleting pieces out from under a
+     * running one is a shared-state hazard. `moveToTrash` also does a
+     * read-modify-write of the trash index, which two concurrent deletes would
+     * lose.
+     */
+    fun deleteTransfer(context: Context, candidate: TransferCandidate) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val vaultPath = _savedPath.value
+            ShellQuote.requireAbsPath(vaultPath)
+            val targets = candidate.trashTargets
+            if (targets.isEmpty()) {
+                withContext(Dispatchers.Main) {
+                    context.safeToast("That export is no longer on disk.", Toast.LENGTH_SHORT)
+                }
+                return@launch
+            }
+            if (!RunCoordinator.tryAcquire("delete:export")) {
+                val holder = RunCoordinator.currentOwner ?: "another operation"
+                withContext(Dispatchers.Main) {
+                    context.safeToast(
+                        "Another operation is in progress ($holder) — try again when it finishes",
+                        Toast.LENGTH_LONG
+                    )
+                }
+                return@launch
+            }
+            var batch: Trash.Batch? = null
+            try {
+                batch = runCatching {
+                    MigratorManager.moveToTrash(context, vaultPath, targets, "exports")
+                }.getOrNull()
+                // A target that still exists did NOT move. Reporting success
+                // anyway is the exact class of bug this app shipped before.
+                val remaining = targets.count {
+                    Shell.cmd("[ -e ${ShellQuote.q(it)} ]").exec().isSuccess
+                }
+                if (remaining > 0) {
+                    DroidVaultLogger.w(
+                        "Transfer",
+                        "export delete: ${targets.size - remaining} of ${targets.size} moved; " +
+                            "$remaining still on disk"
+                    )
+                }
+                batch?.let { refreshTrash() }
+            } finally {
+                RunCoordinator.release()
+            }
+            // The listing is re-read whatever happened, because it just changed
+            // and this is the screen that shows it (§2.58's rule, one list over).
+            refreshTransfers()
+            withContext(Dispatchers.Main) {
+                val moved = batch?.count ?: 0
+                context.safeToast(
+                    when {
+                        moved == 0 ->
+                            "Could not delete it — check root access and the vault path"
+                        else ->
+                            "${candidate.sizeLabel} freed — recoverable for 7 days in Recently deleted"
+                    },
+                    Toast.LENGTH_LONG
+                )
+            }
+        }
+    }
+
+    /**
+     * Delete ONE device archive, from the Manage screen's device list.
+     *
+     * This is a flag mapper and nothing else. [deleteDeviceBackups] is the only
+     * device-delete path in the app — it holds the run gate, moves rather than
+     * erases, re-checks that the file actually left, and is the same function
+     * the Erase Native dialog calls. Writing a second delete "just for one item"
+     * would be exactly the duplication that made the consent and restore gates
+     * ship wrong on one path each (invariant 18), and the archives it touches are
+     * the ones a scheduled Automation run is reading at the same time.
+     *
+     * Restore deliberately does NOT come from here: restoring device data lives
+     * in Migrate and goes through [runDeviceDataOperation], which is the same
+     * function `AutomationRunner` restores through. A second restore entry point
+     * on a third screen would be a third answer to "is this item damaged?".
+     */
+    fun deleteDeviceBackup(context: Context, item: DeviceDataItem) {
+        deleteDeviceBackups(
+            context = context,
+            doSms = item == DeviceDataItem.MESSAGES,
+            doCall = item == DeviceDataItem.CALLS,
+            doContacts = item == DeviceDataItem.CONTACTS,
+            doWifi = item == DeviceDataItem.WIFI,
+            doWallpaper = item == DeviceDataItem.WALLPAPER,
+            doBluetooth = item == DeviceDataItem.BLUETOOTH,
+            doFolders = item == DeviceDataItem.FOLDERS
+        )
+    }
+
+    /**
+     * Start an import from a listed export.
+     *
+     * The page has already resolved the whole set — every piece, in stream order
+     * — so this hands the existing importer a complete list rather than letting
+     * it work one name at a time from a single picked file. That is the same code
+     * path the picker reaches through `importVaultFromUri`, minus the URI.
+     *
+     * `alreadyStaged` is left at its default on purpose. It reads like it means
+     * "the archive is already on disk" — which is true here — but it actually
+     * means "**the caller has already taken the run gate and set the progress
+     * state**", and it skips that block when true. Passing it to avoid a
+     * redundant copy started an import with no gate held and no `isRunning`
+     * flag: the engine never ran, nothing was written, and the screen looked
+     * exactly as it had before the tap. Two copies of the gate rule would also
+     * be invariant 18's failure, so this asks [importVaultFrom] for the one it
+     * already owns. There is no staged copy to clean up, so `stagedCopy` stays
+     * null and nothing is deleted on the way out.
+     *
+     * The list is deliberately NOT cleared. An import reads the export and writes
+     * the VAULT; it does not consume the file, and every piece is still on disk
+     * afterwards. Clearing it produced "No exports on this phone" — a flat lie,
+     * on a screen whose entire value is that what it lists is really there.
+     */
+    fun importTransfer(context: Context, candidate: TransferCandidate) {
+        if (!candidate.canImport) {
+            context.safeToast(
+                candidate.problem ?: "This export is not complete.",
+                Toast.LENGTH_LONG
+            )
+            return
+        }
+        importVaultFrom(
+            context,
+            candidate.importPath,
+            sourceParts = candidate.sourceParts
+        )
+    }
 
     /**
      * Stop the running import.
@@ -4249,6 +4843,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 MigratorMode.MANAGE -> {
                     fetchAppsList("AllBackups")
                     refreshFolderArchive()
+                    // The transfer files this phone holds are managed here too, so
+                    // the list that shows them is read on arrival rather than only
+                    // when the Import page happens to be opened. Without this the
+                    // Exports card was permanently empty on the one screen whose job
+                    // is managing what is on the phone.
+                    refreshTransfers()
+                    // Same for the device archives the Device data card lists.
+                    // A batch restored from the trash can put a `Messages.shift`
+                    // back, and this is the read that would notice (§2.71 — write
+                    // the refresh rule against the write, not against the list
+                    // that happened to be on screen).
+                    refreshDeviceBackups()
+                }
+                MigratorMode.IMPORT_TRANSFERS -> {
+                    // Deliberately fetches NO app list. This screen lists the
+                    // exports this phone holds — files in Download/DroidVault —
+                    // and seeding it with the installed package set would be
+                    // both a pointless scan of hundreds of rows and a second
+                    // thing for the screen to have to ignore. `refreshTransfers`
+                    // is driven by the screen's own arrival instead.
                 }
             }
         }

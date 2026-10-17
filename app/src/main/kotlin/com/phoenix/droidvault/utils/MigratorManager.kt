@@ -13,6 +13,7 @@ import androidx.core.content.pm.PackageInfoCompat
 import androidx.core.graphics.createBitmap
 import com.phoenix.droidvault.BuildConfig
 import com.phoenix.droidvault.models.AppInfo
+import com.phoenix.droidvault.models.AppParts
 import com.phoenix.droidvault.models.AppSeed
 import com.phoenix.droidvault.models.AppState
 import com.phoenix.droidvault.models.LiveOp
@@ -22,6 +23,7 @@ import com.phoenix.droidvault.models.VerificationParser
 import com.phoenix.droidvault.models.Trash
 import com.phoenix.droidvault.models.VaultTransfer
 import com.phoenix.droidvault.models.VerificationReport
+import com.phoenix.droidvault.models.findingsLine
 import com.phoenix.droidvault.models.summaryLine
 import com.phoenix.droidvault.models.Parts
 import com.topjohnwu.superuser.Shell
@@ -115,11 +117,11 @@ object MigratorManager {
             ).exec()
             staged.delete()
             if (!res.isSuccess) {
-                android.util.Log.w("MigratorManager", "Trash manifest write failed: exit ${res.code}")
+                DroidVaultLogger.w("Trash", "manifest write failed: exit ${res.code}")
             }
             res.isSuccess
         } catch (e: Exception) {
-            android.util.Log.w("MigratorManager", "Trash manifest write failed: ${e.message}")
+            DroidVaultLogger.w("Trash", "manifest write failed: ${e.message}")
             false
         }
     }
@@ -191,10 +193,21 @@ object MigratorManager {
                 val recorded = saveTrash(context, vaultPath, kept)
                 // Also record the batch id so a user can at least find it by hand.
                 if (!recorded) {
-                    android.util.Log.e(
-                        "MigratorManager",
-                        "Trash: index write FAILED for batch $id — $id/moved items are in " +
-                            "$base but have no manifest entry and cannot be restored from the app"
+                    // This used to go to `android.util.Log` ONLY. That is the
+                    // worst possible destination for it: logcat is stripped by
+                    // R8 in release, is not readable through the in-app
+                    // Diagnostics screen, and is gone by the time anyone reads a
+                    // bug report. This is the failure invariant 24 exists for —
+                    // archives under `.trash/<id>/` with no index entry, so
+                    // invisible, unrestorable from the app, and never purged
+                    // because purge is index-driven — while the user was told
+                    // "recoverable for 7 days". It has to be in the file a field
+                    // report can actually carry.
+                    DroidVaultLogger.e(
+                        "Trash",
+                        "index write FAILED for batch $id — $id holds " +
+                            "${moved.size} item(s) at $base with no manifest entry; " +
+                            "they cannot be restored from the app and will not be purged"
                     )
                 }
                 Trash.expiredBatchIds(kept, System.currentTimeMillis()).forEach { stale ->
@@ -202,9 +215,26 @@ object MigratorManager {
                 }
             }
             if (failed.isNotEmpty()) {
-                android.util.Log.w(
-                    "MigratorManager",
-                    "Trash: ${failed.size} item(s) could not be moved and remain on disk: $failed"
+                DroidVaultLogger.w(
+                    "Trash",
+                    "${failed.size} of ${paths.size} could not be moved and remain on disk: $failed"
+                )
+            }
+            if (moved.isNotEmpty()) {
+                // The record invariant 11 promises. "Delete is a rename" is the
+                // app's central claim about its most destructive action, and until
+                // this line it left no trace anywhere except a toast: three
+                // different routes reach here (the Erase Native dialog, the Manage
+                // card's per-item control, and an export delete), and "which batch
+                // is b1792073022516?" was unanswerable offline. Names come from
+                // `Trash.Entry.label`, already sanitised through `safeLabel`, so
+                // this is a file list and never a payload.
+                DroidVaultLogger.i(
+                    "Trash",
+                    "quarantined ${AppParts.count(moved.size, "item")} as $id " +
+                        "(${Trash.batchLabel(moved.size, kind)}): " +
+                        "${Trash.entrySummary(batch)} — ${batch.totalKb} KB held, " +
+                        "recoverable for 7 days"
                 )
             }
             return batch
@@ -253,6 +283,31 @@ object MigratorManager {
                     "find ${ShellQuote.q("${trashDir(vaultPath)}/$batchId")} -depth -type d " +
                         "-exec rmdir -- {} + 2>/dev/null"
                 ).exec()
+                // The undo side of the same record. An undo that silently put back
+                // two of six items is a state neither the user nor the next person
+                // to read the log can account for, and `restored` is the only
+                // number that knows. `batch.entries` names are already sanitised
+                // labels, so nothing identifying is added here.
+                DroidVaultLogger.i(
+                    "Trash",
+                    if (batch.entries.isEmpty()) {
+                        "restore $batchId: batch was empty"
+                    } else {
+                        "restored ${AppParts.count(restored, "item")} from $batchId " +
+                            "(${Trash.batchLabel(batch.entries.size, batch.kind)}: " +
+                            "${Trash.entrySummary(batch)})${
+                                if (restored == batch.entries.size) ""
+                                else " — ${batch.entries.size - restored} did NOT move"
+                            }"
+                    }
+                )
+                if (restored < batch.entries.size) {
+                    DroidVaultLogger.w(
+                        "Trash",
+                        "restore $batchId left ${batch.entries.size - restored} item(s) " +
+                            "in the trash; the index entry is gone, so they are now unreferenced"
+                    )
+                }
                 restored
             }
         } finally {
@@ -272,6 +327,17 @@ object MigratorManager {
             }
             Shell.cmd("rm -rf -- ${ShellQuote.q("${trashDir(vaultPath)}/$batchId")}").exec()
             saveTrash(context, vaultPath, batches.filterNot { it.id == batchId })
+            // The one irreversible action in the app, and the only one that
+            // destroys data. It is confirmed in a dialog and it leaves a toast,
+            // and neither of those survives the week between doing it and
+            // asking about it. This is the line that answers "did I empty the
+            // trash, and what did it take".
+            DroidVaultLogger.w(
+                "Trash",
+                "ERASED $batchId permanently: ${AppParts.count(batch.entries.size, "item")} " +
+                    "(${Trash.batchLabel(batch.entries.size, batch.kind)}: " +
+                    "${Trash.entrySummary(batch)}) — ${batch.totalKb} KB, not recoverable"
+            )
             return true
         } finally {
             trashIndexLock.unlock()
@@ -330,6 +396,18 @@ object MigratorManager {
                 }
             }
         DroidVaultLogger.i("Verify", report.summaryLine())
+        // The summary is COUNTS. A field report that says "Restore did nothing"
+        // needs the file name, and the counts alone make the log a worse record
+        // than the dialog the user was looking at — invariant 41 requires a
+        // finding to name the artefact it is about, and that was satisfied on
+        // screen while the log, which is what actually gets sent, still said
+        // "1 of 7 device data archives damaged".
+        //
+        // Capped, because a vault with 110 damaged apps would otherwise produce
+        // one unreadable line, which defeats the purpose. The cap is stated in
+        // the line itself rather than silently truncating, so a reader can tell
+        // the difference between "these are all of them" and "there are more".
+        DroidVaultLogger.i("Verify", report.findingsLine())
         report
     }
 
@@ -517,7 +595,7 @@ object MigratorManager {
                                 version = pi.versionName ?: ""
                                 vCode = PackageInfoCompat.getLongVersionCode(pi)
                                 } catch (e: Exception) {
-                                    android.util.Log.d("MigratorManager", "Icon cache write skipped")
+                                    DroidVaultLogger.d("Migrate", "Icon cache write skipped")
                                 }
 
                             val iconFile = File(iconCacheDir, "${pkg}_icon.png")
@@ -813,7 +891,10 @@ object MigratorManager {
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DroidVault::OperationWakelock")
             wakeLock.acquire(15 * 60 * 1000L)
         } catch (e: SecurityException) {
-            android.util.Log.w("MigratorManager", "WakeLock denied, continuing without it")
+            DroidVaultLogger.w(
+                "Migrate",
+                "WakeLock denied — continuing without it; a long run may be cut short"
+            )
         }
 
         // Live progress: when [trackProgress] the run feeds ProgressTracker so the
@@ -945,8 +1026,8 @@ object MigratorManager {
             // anyway put two engines under one UI (audit A-08): abort with an
             // honest error instead of corrupting both runs' progress.
             if (!started) {
-                android.util.Log.w(
-                    "MigratorManager",
+                DroidVaultLogger.w(
+                    "Migrate",
                     "ProgressTracker refused startRun — another tracked run is active"
                 )
                 DroidVaultLogger.w("Migrate", "Tracker refused startRun — another run is active")
@@ -1002,7 +1083,7 @@ object MigratorManager {
             if (gateHeld) false else RunCoordinator.tryAcquire("manual:${state.migratorMode.name}")
         if (!gateHeld && !acquiredHere) {
             val holder = RunCoordinator.currentOwner ?: "another operation"
-            android.util.Log.w("MigratorManager", "run refused: gate held by $holder")
+            DroidVaultLogger.w("Gate", "run refused: gate held by $holder")
             updateProgress("Another operation is in progress", "$holder is still running.", -1)
             // The tracker was claimed above, BEFORE the gate, and this return
             // happens before the try/finally that releases it. Without an
@@ -1141,7 +1222,7 @@ object MigratorManager {
                                 .exec().out.joinToString("").trim() == "YES"
                             if (hasAndId) parts.add("AndID")
                         } catch (e: Exception) {
-                            android.util.Log.d("MigratorManager", "AndID check skipped: ${e.message}")
+                            DroidVaultLogger.d("Migrate", "AndID check skipped: ${e.message}")
                         }
                     }
                     appPartsMap[app.packageName] = parts.joinToString(" • ")
@@ -1221,12 +1302,18 @@ object MigratorManager {
                 val pkg = try {
                     ShellQuote.requirePackage(app.packageName)
                 } catch (_: IllegalArgumentException) {
-                    android.util.Log.w("MigratorManager", "skipping target with invalid package id")
+                    DroidVaultLogger.w(
+                        "Migrate",
+                        "skipping target with invalid package id: ${app.packageName}"
+                    )
                     return@joinToString ""
                 }
                 val apk = app.apkPath ?: ""
                 if ('\n' in apk || '\r' in apk || '|' in apk) {
-                    android.util.Log.w("MigratorManager", "skipping target with unsafe apk path")
+                    DroidVaultLogger.w(
+                        "Migrate",
+                        "skipping target with unsafe apk path: ${app.packageName}"
+                    )
                     return@joinToString ""
                 }
                 "$pkg|${ShellQuote.safeLabel(app.label)}|${ShellQuote.safeLabel(app.version)}|${app.versionCode}|$sysType|$apk|${app.appSizeKb}|${app.dataSizeKb}|${app.mediaSizeKb}|$comps"
@@ -1324,7 +1411,7 @@ object MigratorManager {
                             }
                         }
                     } catch (e: Exception) {
-                        android.util.Log.w("MigratorManager", "Icon prepare failed: ${e.message}")
+                        DroidVaultLogger.w("Migrate", "Icon prepare failed: ${e.message}")
                     }
                 }
                 if (iconScript.isNotEmpty()) {

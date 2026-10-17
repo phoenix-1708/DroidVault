@@ -816,8 +816,130 @@ android {
         // Verified on device: 30 GB split export 30 min -> 3m07s; import
         // ~8 min -> ~2m45s; parts, manifest and Check all verified; archives
         // written by earlier builds still import unchanged.
-        versionCode = 400000
-        versionName = "2.0.0"
+        // 3.0.0 (500000) — stable. Manage Backups, diagnostics, the log
+        // viewer, and a UI that finally reads as one app.
+        // versionCode 500000 — a NEW major-version band, ABOVE every code ever
+        // published: 300015 (1.0.0), the 300018/300019 1.x builds, and 400000
+        // (2.0.0). `pm install -r` refuses a downgrade with
+        // INSTALL_FAILED_VERSION_DOWNGRADE, and the only way past that is to
+        // uninstall first, which drops the user's preferences, their scheduled
+        // jobs, and Magisk's per-UID grant. A major-version band is only worth
+        // starting above every code ever shipped — the "200000+ series for 2.x"
+        // rule put 2.0.0 BELOW what 1.x had already published, and the install
+        // was refused on a real device (§2.64).
+        //  - Buttons you could miss now have a full-size tap area. The small
+        //    arrow and bin buttons were 28 to 40dp to touch - well under the 48dp
+        //    a fingertip needs - and looked small because their icons were small,
+        //    which is not a reason to shrink the button around them.
+        //  - Screen readers can now name every button. One control on the flash
+        //    order - the one that removes an action - announced nothing at all.
+        //  - The settings self-check can no longer freeze the screen if its
+        //    threading is ever tidied up "to match" the three callbacks beside it.
+        //  - "Nothing here" now looks the same wherever it appears, and in the
+        //    app's own colours rather than a tint that meant nothing. Run history
+        //    no longer paints its empty state in a shade of the wallpaper.
+        //  - Two shortcut icons now match what they do. "Back up device data"
+        //    and "Restore device data" wore the same picture, so you could not
+        //    tell them apart; and "Erase Native" had a phone-settings icon
+        //    instead of anything that meant erasing.
+        //  - Bigger text now works properly. At a large font size the bottom bar
+        //    used to cut the last letter off "Migrate", the Home buttons showed
+        //    "Back up a..." instead of their names, and the backup-health line
+        //    lost the end of its sentence — which is the part telling you what to
+        //    do about it.
+        //  - The Home screen no longer has an empty band across the middle of
+        //    it. Editing a shortcut is a button in the top bar next to Settings,
+        //    where every other app puts its edit button, instead of a small
+        //    pencil floating on its own above a gap.
+        //  - Every animation now shares one set of timings. The app had fourteen
+        //    different ones — 130 and 150 and 180 were all "a short settle" — so
+        //    the motion felt hand-tuned per screen rather than consistent. Sizes
+        //    are unchanged for almost every animation, so nothing feels different;
+        //    they just all move at the same rhythm now.
+        //  - A spinner can no longer look like it has stopped mid-turn, and a
+        //    screen you are leaving now slides away instead of being dragged off.
+        //  - The whole app now reads from one type scale. Seven of Material's
+        //    fifteen text styles were never defined, so the app's own text used
+        //    its weights and roughly 230 other places fell back to Google's —
+        //    which is why stepping down a list changed weight far more than
+        //    size. All fifteen are defined now and every one states every value.
+        //  - No text size changed. Headings are slightly lighter and titles are
+        //    a touch bolder in the hierarchy, but the app still fits on screen
+        //    exactly where it did.
+        //  - Card titles stopped looking like links. Text inside a card took its
+        //    colour from the accent blue instead of the normal reading colour,
+        //    so "Back up apps" and "Magisk 30.7.5" read as hyperlinks. This was
+        //    always broken but invisible, because the wallpaper palette that
+        //    used to supply that blue was a pale near-white.
+        //  - Droid Vault's own colours are now the default; your wallpaper's
+        //    palette is still available in Settings → Theme.
+        //  - Manage Backups gained a Device data card: every device archive
+        //    with its size, date and health, and a per-item delete that goes
+        //    through the recoverable trash. Deleting a device backup is as
+        //    irreversible as deleting an app one, and it is often the only copy.
+        //  - A row can no longer say a vault is empty because a read failed.
+        //    "0 of 7 backed up" was what a renamed vault folder produced: the
+        //    read was wrapped in runCatching and the failure arrived as an
+        //    empty list. Unreadable is now its own state with a reason.
+        //  - The action chips wrap instead of scrolling sideways. Six controls
+        //    were rendered as a row you had to scroll to read, with names that
+        //    appeared for three seconds and then vanished.
+        //  - Export deletes moved to Manage Backups, through the trash, so
+        //    there is one place destructive actions live.
+        //  - The Import page's exports now show their size as the headline and an
+        //    Import button, instead of looking like static text you have to guess
+        //    is tappable. A green, amber or red dot says whether each one is
+        //    actually restorable.
+        //  - If you choose to split an export, the sheet now says WHY it needs
+        //    twice the room — it keeps the whole file until every piece is
+        //    checked — instead of just quoting a number that looks like a bug.
+        //  - Importing and exporting now ask first, and say what will happen.
+        //    - Importing a backup used to start from one tap of a row and was
+        //      your only chance to notice it was the wrong row.
+        //    - The sheet tells you the size, the space it needs, where the files
+        //      come from and go, how many pieces are present, and the two things
+        //      it used to say nothing about: your existing backups are kept and
+        //      nothing is overwritten, and the export file is left where it is.
+        //    - "Find it somewhere else…" asks too — it was the one way to start
+        //      the same restore with nothing said first.
+        //    - If there is not enough room the button is off and it tells you
+        //      how much more to free, instead of failing minutes in.
+        //  - Exporting asks first too, and the one-file-or-parts choice moved
+        //    into that same sheet — so you confirm with the decision already
+        //    made, and the space figure updates as you change it.
+        //  - The Import page explains what it is about to do, and when it has no
+        //    exports it says what is actually true about your backups instead of
+        //    telling you to go and do something on another tab. Someone who has
+        //    just flashed their phone is usually standing on that page, and the
+        //    vault is still exactly where it was.
+        //  - "Find it somewhere else…" is a link rather than a second button, so
+        //    the empty state has one obvious action instead of two equal ones.
+        //  - The diagnostics log records what happened, with counts, names and
+        //    sizes — trash moves, refusals, restore gates, transfer verdicts.
+        //    Findings name the archive they are about instead of reporting a
+        //    count. Eleven messages went only to logcat, which is stripped from
+        //    release builds, so a field report could not carry them.
+        //  - The Live log can be filtered by severity and searched, colours each
+        //    line by level, and keeps your scroll position when you scroll up
+        //    to read — previously it snapped back to the newest line every time
+        //    one arrived, which made reading during a run impossible.
+        //  - The status line now says what each number is: "82.0 KB in today's
+        //    log · 6 lines since launch", not "82.00 KB on disk · 6 lines in
+        //    memory", which read as a contradiction.
+        //  - Copy on an empty log no longer claims it copied one line.
+        // Verified on device: the level filter, the search, the scroll position
+        // holding across 82 arriving lines and resuming at the tail, the new
+        // wording, and the whole sheet at a 2x font.
+        // Verified for the release as a whole: a 30 GB round trip — backup of
+        // two large apps, export split into 15 parts, the vault quarantined then
+        // erased permanently, and import back to ADDED:2|KEPT:0|FAILED:0 —
+        // with 0 ERROR/FATAL across 1,414 log lines, on a build byte-identical to
+        // the installed one. Every phase of the UI work measured on the device:
+        // the type scale and palette flip, both blocked empty states, all
+        // thirteen released touch targets at 1x and 2x, the Home layout at both
+        // font scales, and the full tab sweep.
+        versionCode = 500000
+        versionName = "3.0.0"
     }
 
     signingConfigs {

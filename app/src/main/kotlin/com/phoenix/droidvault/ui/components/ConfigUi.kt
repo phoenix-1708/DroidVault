@@ -169,7 +169,6 @@ fun CompactRuleCard(
                 Text(
                     "#$index  $labelName" + if (rule.exclude) "  •  SKIP" else "",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -181,14 +180,14 @@ fun CompactRuleCard(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            IconButton(onClick = onMoveUp, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onMoveUp) {
                 Icon(
                     Icons.Default.KeyboardArrowUp,
                     contentDescription = "Move rule up",
                     modifier = Modifier.size(20.dp)
                 )
             }
-            IconButton(onClick = onMoveDown, modifier = Modifier.size(36.dp)) {
+            IconButton(onClick = onMoveDown) {
                 Icon(
                     Icons.Default.KeyboardArrowDown,
                     contentDescription = "Move rule down",
@@ -344,7 +343,6 @@ fun AdvancedSection(
                     Text(
                         "Advanced",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
                     )
                     Text(
                         summary,
@@ -442,7 +440,6 @@ fun CompactNavRow(
             Text(
                 title,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -495,7 +492,7 @@ fun DiscardChangesDialog(
 /** Destructive icon button shared by rule rows (visibly destructive). */
 @Composable
 fun DeleteIconButton(onDelete: () -> Unit, contentDescription: String) {
-    IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+    IconButton(onClick = onDelete) {
         Icon(
             Icons.Default.Delete,
             contentDescription = contentDescription,

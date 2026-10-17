@@ -3,6 +3,7 @@ package com.phoenix.droidvault.ui.theme
 import android.app.WallpaperManager
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -149,6 +150,28 @@ fun DroidVaultTheme(
         // Android 12+ dynamic colour all land here), not the themeMode int.
         CompositionLocalProvider(
             LocalDvPalette provides dvPaletteFor(colorScheme),
+            // Default the content colour ONCE, here, rather than trusting every
+            // container to resolve its own.
+            //
+            // A `Surface` takes `contentColor = contentColorFor(color)`, and
+            // `contentColorFor` answers only for the roles it knows. For a
+            // `surfaceContainer*` colour it returns `Unspecified`, so the
+            // container inherits whatever is above it — and what is above it,
+            // on this app, is `primary`. Every colourless `Text` inside one of
+            // the 29 container Surfaces was therefore rendering in the accent
+            // blue rather than the reading colour: the Home shortcut titles read
+            // as hyperlinks, and `Magisk 30.7.5` read as a link rather than a
+            // value. Measured, not guessed: rgb(142,171,255) where `onSurface`
+            // is rgb(228,229,240).
+            //
+            // It read correctly for years by accident — with dynamic colour ON,
+            // the wallpaper's `primary` happened to be a pale near-white, so
+            // `primary` and `onSurface` were indistinguishable on screen. That
+            // is why the defect survived: it was invisible under exactly the
+            // setting that shipped as the default. `AccentContrastTest` could
+            // not see it either, because every role it checks is one the app
+            // sets explicitly.
+            LocalContentColor provides colorScheme.onSurface,
             content = content
         )
     }

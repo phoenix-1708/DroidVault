@@ -38,6 +38,7 @@ import androidx.compose.material.icons.Icons
 import com.phoenix.droidvault.ui.safeToast
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -96,6 +97,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -109,6 +111,7 @@ import com.phoenix.droidvault.models.HealthSeverity
 import com.phoenix.droidvault.models.HomeShortcut
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.models.ShortcutTarget
+import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.DvRole
 import com.phoenix.droidvault.ui.theme.DvSpacing
 import com.phoenix.droidvault.ui.theme.DvShapes
@@ -134,7 +137,12 @@ private fun HomeShortcut.icon(): ImageVector = when (this) {
     HomeShortcut.DEBOOT -> Icons.Default.DeleteSweep
     HomeShortcut.SYSTEMIZE -> Icons.Default.SecurityUpdateGood
     HomeShortcut.DEVICE_BACKUP -> Icons.Default.PhoneAndroid
-    HomeShortcut.DEVICE_RESTORE -> Icons.Default.PhoneAndroid
+    // Was PhoneAndroid, the same icon as DEVICE_BACKUP directly above. Two
+    // OPPOSITE actions on one screen, indistinguishable by icon, is not a
+    // duplicate anyone can act on — the label is the only thing left telling
+    // them apart. `Restore` is what every other restore in the app already uses,
+    // so this is consistency as much as distinction.
+    HomeShortcut.DEVICE_RESTORE -> Icons.Default.Restore
     HomeShortcut.PARTITION_TOOLS -> Icons.Default.FlashOn
     HomeShortcut.UTILITIES -> Icons.Default.Build
     HomeShortcut.AUTOMATION -> Icons.Default.Schedule
@@ -166,7 +174,14 @@ fun DashboardScreen(
     onOpenTab: (Int) -> Unit,
     onOpenMigrator: (MigratorMode) -> Unit,
     onOpenAutomation: (AutoMode) -> Unit = {},
-    onOpenDeviceData: (backup: Boolean) -> Unit = {}
+    onOpenDeviceData: (backup: Boolean) -> Unit = {},
+    // The shortcut edit toggle lives in the app bar beside the gear. It used to
+    // be a pencil floating in the column, and that is what made the hole: a
+    // 48dp touch target holding one 20dp icon, right-aligned, in a full-width
+    // row, so the void above it was 20dp of column gap PLUS half a touch target
+    // and the void below was another half. Two half-targets of nothing around a
+    // single control, and the group's own comment claimed to have fixed it.
+    editMode: Boolean = false
 ) {
     val context = LocalContext.current
     val savedPath by viewModel.savedPath.collectAsStateWithLifecycle()
@@ -196,8 +211,11 @@ fun DashboardScreen(
     // Two DISTINCT modes. Conflating them was a real bug: one flag both revealed
     // the per-card remove buttons AND opened the picker over them, so the remove
     // buttons could never be tapped, and "Add shortcut" closed the dialog.
-    var editMode by remember { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
+    // Leaving edit mode closes the picker. The pencil used to own both, and its
+    // one tap had to remember to reset the other; now the sheet follows the mode
+    // rather than the mode following the sheet.
+    LaunchedEffect(editMode) { if (!editMode) pickerOpen = false }
 
     LaunchedEffect(Unit) {
         viewModel.refreshDeviceBackups()
@@ -228,74 +246,43 @@ fun DashboardScreen(
             onReview = { onOpenMigrator(MigratorMode.MANAGE) }
         )
 
-        // The edit control and the grid it edits are ONE block. As its own
-        // child of a uniformly-spaced column the pencil got a 20dp gap above
-        // it AND another below, around a single 48dp button, which read as a
-        // hole in the layout rather than as a control. Grouping them puts the
-        // pencil tight against the grid it acts on and leaves exactly one gap
-        // separating the block from the hero above it.
-        Column(verticalArrangement = Arrangement.spacedBy(DvSpacing.sm)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
+    if (shortcuts.isEmpty()) {
+        EmptyShortcutsCard(onPick = { pickerOpen = true })
+    } else {
+        ShortcutGrid(
+            shortcuts = shortcuts,
+            editing = editMode,
+            enabledFor = { item -> appState.hasRoot || item.kind != ShortcutTarget.MIGRATOR },
+            onOpen = { item ->
+                when (item.kind) {
+                    ShortcutTarget.MIGRATOR -> onOpenMigrator(item.mode)
+                    ShortcutTarget.AUTOMATION -> onOpenAutomation(item.autoMode)
+                    ShortcutTarget.DEVICE_DATA -> onOpenDeviceData(item.deviceBackup)
+                    ShortcutTarget.TAB -> onOpenTab(item.tab)
+                }
+            },
+            onRemove = { item ->
+                // A silently dead X is worse than a refused action: report it.
+                if (!viewModel.removeHomeShortcut(item)) {
+                    context.safeToast("Keep at least one shortcut on the Home screen.")
+                }
+            },
+            onMove = { from, to -> viewModel.moveHomeShortcut(from, to) }
+        )
+        if (editMode) {
+            OutlinedButton(
+                onClick = { pickerOpen = true },
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = DvSpacing.md)
             ) {
-    // No section title: every tile already names its action, so a
-    // heading above them is a label that repeats what follows. With
-    // the heading gone a text button would float on its own, so this
-    // is an icon button — the pencil is a standard edit affordance,
-    // and the label survives for screen readers.
-                Spacer(Modifier.weight(1f))
-                IconButton(
-                    onClick = {
-                        editMode = !editMode
-                        if (!editMode) pickerOpen = false
-                    }
-                ) {
-                    Icon(
-                        if (editMode) Icons.Default.Close else Icons.Default.Edit,
-                        contentDescription = if (editMode) "Finish editing shortcuts" else "Edit shortcuts",
-                        tint = if (editMode) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-            }
-            if (shortcuts.isEmpty()) {
-                EmptyShortcutsCard(onPick = { pickerOpen = true })
-            } else {
-                ShortcutGrid(
-                    shortcuts = shortcuts,
-                    editing = editMode,
-                    enabledFor = { item -> appState.hasRoot || item.kind != ShortcutTarget.MIGRATOR },
-                    onOpen = { item ->
-                        when (item.kind) {
-                            ShortcutTarget.MIGRATOR -> onOpenMigrator(item.mode)
-                            ShortcutTarget.AUTOMATION -> onOpenAutomation(item.autoMode)
-                            ShortcutTarget.DEVICE_DATA -> onOpenDeviceData(item.deviceBackup)
-                            ShortcutTarget.TAB -> onOpenTab(item.tab)
-                        }
-                    },
-                    onRemove = { item ->
-                        // A silently dead X is worse than a refused action: report it.
-                        if (!viewModel.removeHomeShortcut(item)) {
-                            context.safeToast("Keep at least one shortcut on the Home screen.")
-                        }
-                    },
-                    onMove = { from, to -> viewModel.moveHomeShortcut(from, to) }
-                )
-                if (editMode) {
-                    OutlinedButton(
-                        onClick = { pickerOpen = true },
-                        shape = MaterialTheme.shapes.large,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Add shortcut")
-                    }
-                }
+                Icon(Icons.Default.Add, contentDescription = null)
+                Spacer(Modifier.width(DvSpacing.sm))
+                Text("Add shortcut")
             }
         }
+    }
 
         ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
@@ -315,7 +302,6 @@ fun DashboardScreen(
                     Text(
                         "Backup location",
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
                     )
                 }
                 Text(
@@ -332,7 +318,6 @@ fun DashboardScreen(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                             color = dvAccent(DvRole.Device),
                             style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold
                         )
                     }
                     Spacer(Modifier.width(DvSpacing.sm))
@@ -425,7 +410,7 @@ private fun VaultHero(
             vaultFill != null && vaultFill >= 0.9f -> MaterialTheme.colorScheme.error
             else -> dvAccent(DvRole.Backup)
         },
-        animationSpec = tween(400),
+        animationSpec = DvMotion.settle(DvMotion.emphasised),
         label = "vaultBar"
     )
 
@@ -450,7 +435,6 @@ private fun VaultHero(
                     else -> "${com.phoenix.droidvault.models.AppParts.count(count, "app")} backed up"
                 },
                 style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold
             )
             Spacer(Modifier.height(DvSpacing.xs))
             Text(
@@ -534,8 +518,12 @@ private fun StatTile(
             Text(
                 value,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
+                // Two lines, because at a 2x font "Magisk 30.7.5" no longer fits
+                // on one in a half-width stat tile and was cut to "Magisk 3…".
+                // The tile is a fixed height, so this grows the card rather than
+                // clipping inside it — which is the right trade: a version number
+                // you cannot read is worse than a tile that is a line taller.
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
         }
@@ -603,8 +591,19 @@ private fun HealthRow(
                     it,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    // No line cap. These two are complete sentences and both
+                    // state something the user acts on: the advice names the
+                    // action, the footnote names how long the finding has stood
+                    // and which kind of run has been over the vault since.
+                    //
+                    // Capping them was wrong at every size and worst at 2x,
+                    // where the advice lost its tail three separate times —
+                    // 2 lines cut it to "confirm the archi…", 3 lines still cut it
+                    // to "archives are still …". Both cuts landed on the verb and
+                    // the noun doing the work. The row is free to grow; the
+                    // sentence is not free to be shortened by the layout.
+                    // (Invariant 41: a finding says how old it is and what has
+                    // been over the vault since. An ellipsis deletes that.)
                 )
             }
             // Its own line, quieter than the one above: the names are what the
@@ -615,8 +614,8 @@ private fun HealthRow(
                     it,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    // Uncapped for the reason given above: this sentence IS the
+                    // second fact, and a cap deletes it.
                 )
             }
         }
@@ -681,45 +680,86 @@ private fun ShortcutGrid(
     onRemove: (HomeShortcut) -> Unit,
     onMove: (Int, Int) -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(DvSpacing.md)) {
-        shortcuts.chunked(SHORTCUT_COLUMNS).forEachIndexed { rowIndex, row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(DvSpacing.md)) {
-                row.forEachIndexed { columnInRow, item ->
-                    val index = rowIndex * SHORTCUT_COLUMNS + columnInRow
-                    ShortcutTile(
-                        item = item,
-                        modifier = Modifier.weight(1f),
-                        enabled = enabledFor(item),
-                        editing = editing,
-                        onOpen = { onOpen(item) },
-                        onRemove = { onRemove(item) },
-                        // The nullability IS the enabled state. Reordering is a
-                        // flat list, so "can this move" is index-relative and
-                        // NOT row-relative: the second tile of the top row is one
-                        // position from the start and can certainly move up.
-                        // Gating that on rows left a live-looking arrow that did
-                        // nothing when tapped.
-                        onMoveUp = if (index > 0) ({ onMove(index, index - 1) }) else null,
-                        onMoveDown = if (index + 1 < shortcuts.size)
-                            ({ onMove(index, index + 1) }) else null
-                    )
-                }
-                // Keeps a trailing odd tile the same width as a paired one.
-                repeat(SHORTCUT_COLUMNS - row.size) {
-                    Spacer(Modifier.weight(1f))
+    // Columns are DERIVED, not declared.
+    //
+    // This was `chunked(SHORTCUT_COLUMNS)` with a constant of 2, and a fixed
+    // column count is only correct at one font scale: at 2x the tile is the same
+    // number of dp wide and twice the type, so every title truncated — "Back up
+    // a…", "Manage b…". A fixed grid cannot notice that it has stopped working,
+    // because nothing about the layout changed, only the type inside it.
+    //
+    // So the widest title is MEASURED at the current font scale — the same
+    // `rememberTextMeasurer` approach the bottom-nav labels use — and the column
+    // count is the largest that still fits it. Two columns when they do, one when
+    // they do not. A threshold on `fontScale` would have been the cheap version
+    // and it would have been a guess about one phone.
+    BoxWithConstraints {
+        val gridDensity = LocalDensity.current
+        val measurer = rememberTextMeasurer()
+        val titleStyle = MaterialTheme.typography.titleSmall
+        val widestTitlePx = shortcuts.maxOfOrNull {
+            measurer.measure(
+                text = it.title,
+                style = titleStyle,
+                softWrap = false,
+                maxLines = 1,
+                density = gridDensity
+            ).size.width
+        } ?: 0
+        // A tile is its title plus the padding either side of it. Below one tile's
+        // worth of width there is nothing to measure — the title wraps instead,
+        // which is what `titleLines` below arranges.
+        val tileNeedsPx = widestTitlePx + with(gridDensity) { (DvSpacing.lg * 2).toPx() }
+        val gapPx = with(gridDensity) { DvSpacing.md.toPx() }
+        val fitPair = with(gridDensity) { maxWidth.toPx() } >=
+            tileNeedsPx * MAX_SHORTCUT_COLUMNS + gapPx * (MAX_SHORTCUT_COLUMNS - 1)
+        val columns = if (fitPair) MAX_SHORTCUT_COLUMNS else 1
+
+        Column(verticalArrangement = Arrangement.spacedBy(DvSpacing.md)) {
+            shortcuts.chunked(columns).forEachIndexed { rowIndex, row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(DvSpacing.md)) {
+                    row.forEachIndexed { columnInRow, item ->
+                        val index = rowIndex * columns + columnInRow
+                        ShortcutTile(
+                            item = item,
+                            modifier = Modifier.weight(1f),
+                            // One line only while two tiles share the row. Given
+                            // the whole width the title has room to wrap, and a
+                            // truncated name is worse than a two-line one.
+                            titleLines = if (columns == 2) 1 else 2,
+                            enabled = enabledFor(item),
+                            editing = editing,
+                            onOpen = { onOpen(item) },
+                            onRemove = { onRemove(item) },
+                            // The nullability IS the enabled state. Reordering is a
+                            // flat list, so "can this move" is index-relative and
+                            // NOT row-relative: the second tile of the top row is one
+                            // position from the start and can certainly move up.
+                            // Gating that on rows left a live-looking arrow that did
+                            // nothing when tapped.
+                            onMoveUp = if (index > 0) ({ onMove(index, index - 1) }) else null,
+                            onMoveDown = if (index + 1 < shortcuts.size)
+                                ({ onMove(index, index + 1) }) else null
+                        )
+                    }
+                    // Keeps a trailing odd tile the same width as a paired one.
+                    repeat(columns - row.size) {
+                        Spacer(Modifier.weight(1f))
+                    }
                 }
             }
         }
     }
 }
 
-/** Two per row: enough to scan quickly, enough that a title still fits. */
-private const val SHORTCUT_COLUMNS = 2
+/** At most two per row: more than that and a tile is too small to read. */
+private const val MAX_SHORTCUT_COLUMNS = 2
 
 @Composable
 private fun ShortcutTile(
     item: HomeShortcut,
     modifier: Modifier,
+    titleLines: Int,
     enabled: Boolean,
     editing: Boolean,
     onOpen: () -> Unit,
@@ -749,7 +789,6 @@ private fun ShortcutTile(
                     IconButton(
                         onClick = { onMoveUp?.invoke() },
                         enabled = onMoveUp != null,
-                        modifier = Modifier.size(28.dp)
                     ) {
                         Icon(
                             Icons.Default.KeyboardArrowUp, "Move up",
@@ -760,14 +799,13 @@ private fun ShortcutTile(
                     IconButton(
                         onClick = { onMoveDown?.invoke() },
                         enabled = onMoveDown != null,
-                        modifier = Modifier.size(28.dp)
                     ) {
                         Icon(
                             Icons.Default.KeyboardArrowDown, "Move down",
                             modifier = Modifier.size(18.dp)
                         )
                     }
-                    IconButton(onClick = onRemove, modifier = Modifier.size(28.dp)) {
+                    IconButton(onClick = onRemove) {
                         Icon(
                             Icons.Default.Close, "Remove shortcut",
                             tint = MaterialTheme.colorScheme.error,
@@ -795,8 +833,7 @@ private fun ShortcutTile(
             Text(
                 item.title,
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
+                maxLines = titleLines,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
@@ -844,7 +881,6 @@ private fun EmptyShortcutsCard(onPick: () -> Unit) {
             Text(
                 "Add your first shortcut",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
             )
             Text(
                 "Pin the actions you use to the front page.",

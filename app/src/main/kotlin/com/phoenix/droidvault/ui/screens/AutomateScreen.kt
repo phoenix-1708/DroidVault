@@ -121,6 +121,7 @@ import com.phoenix.droidvault.models.FallbackPolicy
 import com.phoenix.droidvault.models.ScheduleType
 import com.phoenix.droidvault.models.displayName
 import com.phoenix.droidvault.ui.components.AppListItem
+import com.phoenix.droidvault.ui.components.DvEmptyState
 import com.phoenix.droidvault.ui.components.ShimmerAppListItem
 
 private fun compShort(c: BackupComponent): String = when (c) {
@@ -141,7 +142,6 @@ private fun SectionTitle(text: String, subtitle: String? = null, modifier: Modif
         Text(
             text,
             style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
         )
         if (subtitle != null) {
@@ -160,7 +160,6 @@ private fun SectionTitleCompact(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.labelLarge,
-        fontWeight = FontWeight.Bold,
         color = MaterialTheme.colorScheme.primary
     )
 }
@@ -351,7 +350,6 @@ private fun ConfigCard(
                         Text(
                             title,
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false)
@@ -369,7 +367,7 @@ private fun ConfigCard(
                 Spacer(modifier = Modifier.width(8.dp))
                 // Reorder within the list (persisted per operation group).
                 Column {
-                    IconButton(onClick = onMoveUp, modifier = Modifier.size(28.dp)) {
+                    IconButton(onClick = onMoveUp) {
                         Icon(
                             Icons.Default.KeyboardArrowUp,
                             contentDescription = "Move up",
@@ -377,7 +375,7 @@ private fun ConfigCard(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    IconButton(onClick = onMoveDown, modifier = Modifier.size(28.dp)) {
+                    IconButton(onClick = onMoveDown) {
                         Icon(
                             Icons.Default.KeyboardArrowDown,
                             contentDescription = "Move down",
@@ -559,7 +557,6 @@ private fun AutoMenu(viewModel: AutomationViewModel, appList: List<AppInfo>) {
             Text(
                 "Automation",
                 style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold
             )
         }
         item {
@@ -651,7 +648,6 @@ private fun MenuGroupLabel(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.labelLarge,
-        fontWeight = FontWeight.SemiBold,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(start = 4.dp, top = 14.dp, bottom = 2.dp)
     )
@@ -675,7 +671,6 @@ private fun TitleRow(title: String, info: String? = null) {
         Text(
             title,
             style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f)
         )
         if (info != null) {
@@ -1065,56 +1060,31 @@ private fun deviceDataSummary(cfg: com.phoenix.droidvault.models.BackupConfig): 
 /** Rich empty state for the Backup/Restore configuration lists. */
 @Composable
 private fun ConfigsEmptyState(isRestore: Boolean, onCreate: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 40.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(96.dp)
-                .background(
-                    dvContainer(if (isRestore) DvRole.Restore else DvRole.Backup),
-                    CircleShape
-                )
-        ) {
-            Icon(
-                if (isRestore) Icons.Default.Restore else Icons.Default.Backup,
-                contentDescription = null,
-                tint = if (isRestore) dvAccent(DvRole.Restore)
-                else dvAccent(DvRole.Backup),
-                modifier = Modifier.size(44.dp)
-            )
+    // Was a private copy of the same block `HistoryEmptyState` below also had —
+    // identical Column, identical 96dp Box, identical gaps and type scale,
+    // differing only in icon and tint. Now `DvEmptyState`; the wrapper stays so
+    // no call site moved.
+    val role = if (isRestore) DvRole.Restore else DvRole.Backup
+    DvEmptyState(
+        icon = if (isRestore) Icons.Default.Restore else Icons.Default.Backup,
+        role = role,
+        title = if (isRestore) "No restore configurations yet"
+        else "No backup configurations yet",
+        body = if (isRestore) {
+            "Create one to automate restores — pick labels, device data and " +
+                "folders once, then run or schedule it after every ROM flash."
+        } else {
+            "Create one to automate backups — e.g. back up everything in " +
+                "your FULL label every night."
+        },
+        action = {
+            Button(onClick = onCreate, shape = CircleShape) {
+                Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(if (isRestore) "New restore configuration" else "New backup configuration")
+            }
         }
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            if (isRestore) "No restore configurations yet"
-            else "No backup configurations yet",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            if (isRestore) {
-                "Create one to automate restores — pick labels, device data and " +
-                    "folders once, then run or schedule it after every ROM flash."
-            } else {
-                "Create one to automate backups — e.g. back up everything in " +
-                    "your FULL label every night."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 24.dp)
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-        Button(onClick = onCreate, shape = CircleShape) {
-            Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text(if (isRestore) "New restore configuration" else "New backup configuration")
-        }
-    }
+    )
 }
 
 @Composable
@@ -1485,7 +1455,6 @@ private fun RestoreEditorScreen(viewModel: AutomationViewModel) {
                 Text(
                     "Add rule",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
             }
@@ -1639,7 +1608,6 @@ private fun RestorePreviewScreen(viewModel: AutomationViewModel) {
                     Text(
                         "Ready for restore (${ready.size}) — tap for details",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
@@ -1665,7 +1633,6 @@ private fun RestorePreviewScreen(viewModel: AutomationViewModel) {
                     Text(
                         "Skipped (${skipped.size})",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     SectionTitleCompact("Assign these apps a matching label, or change the fallback, to include them.")
@@ -1686,7 +1653,6 @@ private fun RestorePreviewScreen(viewModel: AutomationViewModel) {
                     Text(
                         "Partial components (${plan.withUnavailable.size})",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.tertiary
                     )
                     if (plan.withUnavailable.any { e ->
@@ -1877,7 +1843,6 @@ private fun ConfigEditorScreen(viewModel: AutomationViewModel) {
                 Text(
                     "Add rule",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
                 )
             }
@@ -2032,7 +1997,6 @@ private fun PreviewScreen(viewModel: AutomationViewModel, appList: List<AppInfo>
                     Text(
                         "Ready for backup (${ready.size}) — tap for details",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
@@ -2058,7 +2022,6 @@ private fun PreviewScreen(viewModel: AutomationViewModel, appList: List<AppInfo>
                     Text(
                         "Skipped (${skipped.size})",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     SectionTitleCompact("Assign these apps a matching label, or change the fallback, to include them.")
@@ -2079,7 +2042,6 @@ private fun PreviewScreen(viewModel: AutomationViewModel, appList: List<AppInfo>
                     Text(
                         "Partial components (${plan.withUnavailable.size})",
                         style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.tertiary
                     )
                     if (plan.withUnavailable.any { e ->
@@ -2344,7 +2306,6 @@ private fun HistoryScreen(viewModel: AutomationViewModel) {
                             Text(
                                 h.configName,
                                 style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
                                 modifier = Modifier.weight(1f)
                             )
                             Text(
@@ -2384,48 +2345,22 @@ private fun HistoryScreen(viewModel: AutomationViewModel) {
  */
 @Composable
 private fun HistoryEmptyState(allRunsEmpty: Boolean) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 40.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier
-                .size(96.dp)
-                .background(
-                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
-                    CircleShape
-                )
-        ) {
-            Icon(
-                Icons.Default.History,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(44.dp)
-            )
+    // The tint was `primaryContainer.copy(alpha = 0.45f)` and `colorScheme.primary`
+    // — a raw colour meaning nothing, where every other empty state in the app
+    // wears a DvRole. Run history belongs to automation, so DvRole.Auto is the
+    // role that describes it.
+    DvEmptyState(
+        icon = Icons.Default.History,
+        role = DvRole.Auto,
+        title = if (allRunsEmpty) "No runs recorded yet"
+        else "No runs match this filter",
+        body = if (allRunsEmpty) {
+            "Run a configuration — or wait for a schedule — and every " +
+                "backup and restore lands here with its per-item result."
+        } else {
+            "Try All, Backups or Restores above to see the runs you have."
         }
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            if (allRunsEmpty) "No runs recorded yet"
-            else "No runs match this filter",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        Text(
-            if (allRunsEmpty) {
-                "Run a configuration — or wait for a schedule — and every " +
-                    "backup and restore lands here with its per-item result."
-            } else {
-                "Try All, Backups or Restores above to see the runs you have."
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(horizontal = 24.dp)
-        )
-    }
+    )
 }
 
 /** "2m 14s" / "1h 05m" / "45s" — per-app wall time in the run history. */
@@ -2473,7 +2408,6 @@ private fun HistoryDetailScreen(viewModel: AutomationViewModel) {
                             Text(
                                 r.appName.ifEmpty { r.packageName },
                                 style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
                                 modifier = Modifier.weight(1f),
                                 maxLines = 1,
                                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
@@ -2567,7 +2501,6 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
                         Text(
                             "Scheduled runs",
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
                         )
                         Text(
                             "Automatic recurring backups and restores. Turning off cancels all pending runs.",
@@ -2615,7 +2548,6 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
             Text(
                 "Schedules (${state.schedules.size})",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
@@ -2965,7 +2897,6 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
                         Text(
                             "Create a configuration first",
                             style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold
                         )
                         Text(
                             "A schedule runs a configuration automatically, so there is " +
@@ -3241,7 +3172,6 @@ private fun ScheduleOptionRow(
             Text(
                 value,
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
@@ -3301,7 +3231,6 @@ private fun AppDetailScreen(viewModel: AutomationViewModel, appList: List<AppInf
                                 text = app.label.firstOrNull()?.uppercase() ?: "?",
                                 color = androidx.compose.ui.graphics.Color.White,
                                 style = MaterialTheme.typography.headlineMedium,
-                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
@@ -3310,7 +3239,6 @@ private fun AppDetailScreen(viewModel: AutomationViewModel, appList: List<AppInf
                         Text(
                             app.label,
                             style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold
                         )
                         Text(
                             app.packageName,
@@ -3443,7 +3371,6 @@ private fun AppDetailScreen(viewModel: AutomationViewModel, appList: List<AppInf
             Text(
                 "Granted (${detail.granted.size})",
                 style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
