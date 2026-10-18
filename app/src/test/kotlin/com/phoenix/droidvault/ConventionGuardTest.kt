@@ -2734,6 +2734,63 @@ class ConventionGuardTest {
         )
     }
 
+    /**
+     * A screen-identity predicate must be read from navigation state, never
+     * inferred from a display string.
+     *
+     * `isHome` decides three things: whether the shortcut pencil appears,
+     * whether the logo sits beside the app-bar title, and whether the Settings
+     * gear is offered. It was written as `dynamicTitle == "Droid Vault"` — and
+     * `dynamicTitle`'s final `else` branch returns "Droid Vault" for the Home
+     * tab *and* for Migrate's menu, Tools, Flash and the Automation menu. So a
+     * Home-only control appeared on four screens that are not Home, and it
+     * shipped (§2.92).
+     *
+     * The failure is invisible to review because the line looks correct: the
+     * title really is "Droid Vault" on Home. Nothing about the expression says
+     * it is also true elsewhere, and the next person to add a tab titled
+     * "Droid Vault" would reintroduce it without noticing.
+     *
+     * Narrow on purpose. A general "no boolean compared to a string literal"
+     * rule would fire on every mode check in the app (`mode == "restore"` is
+     * correct there), and a guard that false-positives gets deleted.
+     *
+     * Mutation-verified: restoring `dynamicTitle == "Droid Vault"` fails this.
+     */
+    @Test
+    fun `the Home predicate is navigation state and not a title string`() {
+        val src = codeKeepLines(
+            File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/ui/screens/MainScreen.kt")
+                .readText()
+        )
+        val decl = Regex("""val isHome\s*=\s*([^\n]+)""").find(src)
+        assertTrue(
+            "MainScreen must derive `isHome` once, as a named val",
+            decl != null
+        )
+        val expr = decl!!.groupValues[1]
+
+        assertFalse(
+            "`isHome` compares against a string literal (${expr.trim()}). That is how " +
+                "the Home-only pencil leaked onto four other tabs in 3.0.2 — " +
+                "`dynamicTitle` reads \"Droid Vault\" for Home AND for Migrate's menu, " +
+                "Tools, Flash and the Automation menu (§2.92). Read the navigation " +
+                "state instead.",
+            Regex("""==\s*"[^"]*""" + """|"[^"]*"\s*==""").containsMatchIn(expr)
+        )
+        assertFalse(
+            "`isHome` is derived from `dynamicTitle` (${expr.trim()}). The title is a " +
+                "caption; it is not the navigation state. Whatever it renders is " +
+                "irrelevant to which controls belong to Home.",
+            expr.contains("dynamicTitle")
+        )
+        assertTrue(
+            "`isHome` must be anchored to the selected tab (${expr.trim()}), which is " +
+                "the only thing that says which screen is showing.",
+            expr.contains("selectedTab")
+        )
+    }
+
     @Test
     fun `a backup shortcut and its matching restore never share an icon`() {
         val src = codeKeepLines(

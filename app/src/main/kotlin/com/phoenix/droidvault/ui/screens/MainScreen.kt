@@ -683,7 +683,20 @@ fun AppScaffold(
         else -> "Droid Vault"
     }
 
-    val isHome = dynamicTitle == "Droid Vault"
+    // "Is this the Home screen" is a question about NAVIGATION STATE, not about
+    // what the title happens to say.
+    //
+    // It was `dynamicTitle == "Droid Vault"`, and that string comparison was
+    // wrong in both directions at once. `dynamicTitle`'s final `else` branch
+    // returns "Droid Vault" for the Home tab AND for Migrate's menu, Tools,
+    // Flash, and the Automation menu — so the Home-only shortcut pencil, the
+    // Home-only logo beside the title, and the Home-only gear all appeared on
+    // four screens that are not Home (§2.92).
+    //
+    // A display string is a caption. Ask the state machine what it is showing.
+    // `dynamicTitle` is still what renders the title text; this only decides
+    // which controls belong to Home.
+    val isHome = selectedTab == 0 && !showSettings && !showAbout
     // Material 3's compact/expanded breakpoint is 600dp. On expanded windows
     // a rail preserves the vertical workspace; compact phones keep the tuned
     // bottom bar (including its font-scale-aware labels).
@@ -820,17 +833,6 @@ fun AppScaffold(
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
-                            IconButton(
-                                onClick = { onSettingsToggle(true) },
-                                modifier = Modifier.padding(end = 8.dp)
-                            ) {
-                                Icon(
-                                    Icons.Default.Settings,
-                                    contentDescription = "Settings",
-                                    tint = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.size(26.dp)
-                                )
-                            }
                         } else {
                             Icon(
                                 painter = painterResource(id = R.drawable.ic_home),
@@ -842,6 +844,22 @@ fun AppScaffold(
                                     .graphicsLayer {
                                         alpha = if (appState.isRunning) logoAlpha else 1f
                                     }
+                            )
+                        }
+                        // Settings is reachable from every tab, so the gear is
+                        // deliberately OUTSIDE the `isHome` branch. It was
+                        // inside, which meant "Home only" for a control that has
+                        // nothing to do with Home — and hiding it here would have
+                        // made Settings unreachable from four tabs.
+                        IconButton(
+                            onClick = { onSettingsToggle(true) },
+                            modifier = Modifier.padding(end = 8.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.Settings,
+                                contentDescription = "Settings",
+                                tint = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(26.dp)
                             )
                         }
                     },
