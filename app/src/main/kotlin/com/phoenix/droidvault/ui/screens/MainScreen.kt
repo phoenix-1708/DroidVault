@@ -777,19 +777,28 @@ fun AppScaffold(
                 TopAppBar(
                     title = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (isHome) {
-                                Icon(
-                                    painter = painterResource(id = R.drawable.ic_home),
-                                    contentDescription = "Logo",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .size(32.dp)
-                                        .graphicsLayer {
-                                            alpha = if (appState.isRunning) logoAlpha else 1f
-                                        }
+                            // Unconditional. This logo was gated on `isHome`, and
+                            // the only reason it read as "the logo belongs to
+                            // Home" is that the broken predicate also claimed four
+                            // other screens (§2.92). With `isHome` honest the gate
+                            // made the app logo JUMP from the left of the title to
+                            // the right-hand actions on every tab change — a
+                            // regression the honest predicate introduced.
+                            //
+                            // The logo is the app, not a Home affordance, so it
+                            // belongs beside the title everywhere. The actions
+                            // carry controls; a decorative mark is not a control.
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_home),
+                                contentDescription = "Logo",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .graphicsLayer {
+                                        alpha = if (appState.isRunning) logoAlpha else 1f
+                                    }
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
-                            }
                             Text(
                                 text = dynamicTitle,
                                 style = MaterialTheme.typography.headlineMedium,
@@ -834,17 +843,15 @@ fun AppScaffold(
                                 )
                             }
                         } else {
-                            Icon(
-                                painter = painterResource(id = R.drawable.ic_home),
-                                contentDescription = "Logo",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .padding(end = 16.dp)
-                                    .size(32.dp)
-                                    .graphicsLayer {
-                                        alpha = if (appState.isRunning) logoAlpha else 1f
-                                    }
-                            )
+                            // No logo here. It used to be: the actions drew one
+                            // whenever `isHome` was false, while the title drew
+                            // one whenever it was true — so the app mark sat on
+                            // the left of the title on Home and on the right of
+                            // the bar everywhere else, and crossed the screen on
+                            // every tab change. It now lives beside the title
+                            // unconditionally, so the actions carry controls
+                            // only.
+                            Spacer(modifier = Modifier.width(16.dp))
                         }
                         // Settings is reachable from every tab, so the gear is
                         // deliberately OUTSIDE the `isHome` branch. It was
