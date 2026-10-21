@@ -160,9 +160,9 @@ object Trash {
      * two identical "1 app" rows.
      *
      * The stored label is the source directory relative to its own parent
-     * ("User/1DM+", "Device/Messages.shift"), so the name is the last segment.
+     * ("User/1DM+", "Device/Messages.vault"), so the name is the last segment.
      * Archive suffixes are dropped because "Messages" reads better than
-     * "Messages.shift" next to a size.
+     * "Messages.vault" next to a size.
      */
     fun entryNames(batch: Batch): List<String> =
         batch.entries.map { entry ->
@@ -183,7 +183,13 @@ object Trash {
         }
     }
 
-    private val ARCHIVE_SUFFIXES = listOf(".shift", ".txt")
+    /**
+     * The suffixes an archive's name carries, trimmed off for display.
+     *
+     * Both extensions: a quarantined archive keeps the name it had when it
+     * was moved, and that may be the one from before the extension moved.
+     */
+    private val ARCHIVE_SUFFIXES = listOf(".vault", ".shift", ".txt")
 
     fun batchLabel(count: Int, kind: String): String = when (kind) {
         "apps" -> if (count == 1) "1 app" else "$count apps"

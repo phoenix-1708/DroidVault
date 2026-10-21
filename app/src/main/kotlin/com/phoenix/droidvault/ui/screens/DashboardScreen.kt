@@ -69,7 +69,6 @@ import androidx.compose.material.icons.filled.SecurityUpdateGood
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.HorizontalDivider
@@ -657,7 +656,12 @@ private fun rootLabel(root: MainViewModel.RootInfo?, hasRoot: Boolean): String {
         "SUPERUSER" in markers -> "SuperSU"
         else -> return "$version ($raw)"
     }
-    return "$name $version"
+    // Append the version only when it IS one. A manager this build identifies by
+    // name alone reports its own name as the version string (KernelSU returns
+    // "KernelSU"), which printed as "KernelSU KernelSU" on the Home card: a
+    // doubled word with no information in the second one. Anything carrying a
+    // digit is a real version and is still shown ("Magisk 30.7.5").
+    return if (version.any { it.isDigit() }) "$name $version" else name
 }
 
 /**

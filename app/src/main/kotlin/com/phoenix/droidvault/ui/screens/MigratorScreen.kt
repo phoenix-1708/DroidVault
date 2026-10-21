@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.activity.compose.rememberLauncherForActivityResult
 import com.phoenix.droidvault.ui.safeToast
+import com.phoenix.droidvault.models.DeviceDataItem
+import com.phoenix.droidvault.models.VaultArchive
 import com.phoenix.droidvault.models.VaultTransfer
 import com.phoenix.droidvault.models.VerdictStaleness
 import com.phoenix.droidvault.models.staleness
@@ -92,7 +94,6 @@ import androidx.compose.material.icons.filled.Update
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilledTonalIconButton
@@ -143,6 +144,7 @@ import com.phoenix.droidvault.models.AppState
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.ui.components.AnimatedFilterChip
 import com.phoenix.droidvault.ui.components.AppListItem
+import com.phoenix.droidvault.ui.components.DvButton
 import com.phoenix.droidvault.ui.components.ExportConfirmSheet
 import com.phoenix.droidvault.ui.components.PickedImportSheet
 import com.phoenix.droidvault.ui.components.ExpressiveRefreshIndicator
@@ -421,12 +423,15 @@ fun MigratorMenu(viewModel: MainViewModel) {
 
     LaunchedEffect(availableBackups, showDeviceRestoreDialog) {
         if (showDeviceRestoreDialog) {
-            if (availableBackups.contains("Messages.shift")) doSms = true
-            if (availableBackups.contains("CallLogs.shift")) doCall = true
-            if (availableBackups.contains("Contacts.shift")) doContacts = true
-            if (availableBackups.contains("Wi-Fi.shift")) doWifi = true
-            if (availableBackups.contains("Wallpaper.shift")) doWallpaper = true
-            if (availableBackups.contains("Bluetooth.shift")) doBluetooth = true
+            // The item's own archive name, from the model's table: a list of
+            // literals here is a second spelling of one thing, and the two
+            // copies drift.
+            if (availableBackups.contains(VaultArchive.deviceName(DeviceDataItem.MESSAGES))) doSms = true
+            if (availableBackups.contains(VaultArchive.deviceName(DeviceDataItem.CALLS))) doCall = true
+            if (availableBackups.contains(VaultArchive.deviceName(DeviceDataItem.CONTACTS))) doContacts = true
+            if (availableBackups.contains(VaultArchive.deviceName(DeviceDataItem.WIFI))) doWifi = true
+            if (availableBackups.contains(VaultArchive.deviceName(DeviceDataItem.WALLPAPER))) doWallpaper = true
+            if (availableBackups.contains(VaultArchive.deviceName(DeviceDataItem.BLUETOOTH))) doBluetooth = true
             if (availableBackups.contains(BackupConfigFolders.ARCHIVE_FILE)) doFolders = true
         }
     }
@@ -509,7 +514,7 @@ fun MigratorMenu(viewModel: MainViewModel) {
                 }
             },
             confirmButton = {
-                Button(
+                DvButton(
                     enabled = configuredFolders.isNotEmpty() && folderBackupSelection.isNotEmpty(),
                     onClick = {
                         showFolderBackupDialog = false
@@ -580,7 +585,7 @@ fun MigratorMenu(viewModel: MainViewModel) {
                 }
             },
             confirmButton = {
-                Button(
+                DvButton(
                     enabled = archivedFolders.isNotEmpty() && folderRestoreSelection.isNotEmpty(),
                     onClick = {
                         showFolderRestoreDialog = false
@@ -614,7 +619,7 @@ fun MigratorMenu(viewModel: MainViewModel) {
                 )
             },
             confirmButton = {
-                Button(onClick = {
+                DvButton(onClick = {
                     showPermissionWarning = false
                     // Close the selection dialog too: the run starts NOW and
                     // the Processing screen must not stay hidden underneath
@@ -658,15 +663,9 @@ fun MigratorMenu(viewModel: MainViewModel) {
     // list, and a Restore button would be live on an empty vault.
     val nothingAvailable = if (showDeviceRestoreDialog) {
         deviceOptions.none { (label, _) ->
-            val fileName = when (label) {
-                "Messages" -> "Messages.shift"
-                "Calls" -> "CallLogs.shift"
-                "Contacts" -> "Contacts.shift"
-                "Wi-Fi" -> "Wi-Fi.shift"
-                "Wallpaper" -> "Wallpaper.shift"
-                "Bluetooth" -> "Bluetooth.shift"
-                else -> ""
-            }
+            val fileName = DeviceDataItem.fromLabel(label)
+                ?.let { VaultArchive.deviceName(it) }
+                .orEmpty()
             fileName.isNotEmpty() && availableBackups.contains(fileName)
         }
     } else {
@@ -695,15 +694,9 @@ fun MigratorMenu(viewModel: MainViewModel) {
 
                     if (!isBackup) {
                         deviceOptions.retainAll { (label, _) ->
-                            val fileName = when (label) {
-                                "Messages" -> "Messages.shift"
-                                "Calls" -> "CallLogs.shift"
-                                "Contacts" -> "Contacts.shift"
-                                "Wi-Fi" -> "Wi-Fi.shift"
-                                "Wallpaper" -> "Wallpaper.shift"
-                                "Bluetooth" -> "Bluetooth.shift"
-                                else -> ""
-                            }
+                            val fileName = DeviceDataItem.fromLabel(label)
+                                ?.let { VaultArchive.deviceName(it) }
+                                .orEmpty()
                             availableBackups.contains(fileName) ||
                                 (label.startsWith("Folders") && availableBackups.contains(BackupConfigFolders.ARCHIVE_FILE))
                         }
@@ -772,7 +765,7 @@ fun MigratorMenu(viewModel: MainViewModel) {
                 }
             },
             confirmButton = {
-                Button(onClick = {
+                DvButton(onClick = {
                     if (doSms || doCall || doContacts || doWifi || doWallpaper || doBluetooth || doFolders) {
 
                         // Ask through the REAL system dialogs first (the ask
@@ -1087,7 +1080,7 @@ fun MigratorActionScreen(
                 )
             },
             confirmButton = {
-                Button(onClick = { viewModel.adoptCarriedConfigs(context) }) {
+                DvButton(onClick = { viewModel.adoptCarriedConfigs(context) }) {
                     Text("Use the file's")
                 }
             },
@@ -1297,7 +1290,7 @@ fun MigratorActionScreen(
             confirmButton = {
                 val anySelected = delSms || delCall || delContacts || delWifi ||
                         delWallpaper || delBluetooth || delFolders
-                Button(
+                DvButton(
                     enabled = anySelected,
                     onClick = {
                         if (anySelected) viewModel.deleteDeviceBackups(
@@ -1312,7 +1305,10 @@ fun MigratorActionScreen(
                         )
                         showDeviceDeleteDialog = false
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
                 ) { Text("Move to Trash") }
             },
             dismissButton = {
@@ -2040,7 +2036,7 @@ fun MigratorActionScreen(
                     )
                     if (nothingBackedUp && appState.migratorMode == MigratorMode.RESTORE_APPS) {
                         Spacer(Modifier.height(16.dp))
-                        androidx.compose.material3.Button(
+                        DvButton(
                             onClick = { viewModel.setMigratorMode(MigratorMode.BACKUP_APPS) },
                             shape = CircleShape
                         ) { Text("Back up apps") }
@@ -2469,12 +2465,13 @@ fun MigratorActionScreen(
                         }
                         Spacer(modifier = Modifier.width(12.dp))
 
-                        Button(
+                        DvButton(
                             onClick = { viewModel.runDynamicOperation() },
                             enabled = selectedCount > 0 && !isInsufficientSpace,
                             shape = CircleShape,
                             colors = ButtonDefaults.buttonColors(
-                                containerColor = if (appState.migratorMode == MigratorMode.MANAGE || (appState.migratorMode == MigratorMode.DEBLOAT && appState.actionFilterState == 2) || (appState.migratorMode == MigratorMode.SYSTEMIZE && appState.actionFilterState == 2)) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                containerColor = if (appState.migratorMode == MigratorMode.MANAGE || (appState.migratorMode == MigratorMode.DEBLOAT && appState.actionFilterState == 2) || (appState.migratorMode == MigratorMode.SYSTEMIZE && appState.actionFilterState == 2)) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primaryContainer,
+                                contentColor = if (appState.migratorMode == MigratorMode.MANAGE || (appState.migratorMode == MigratorMode.DEBLOAT && appState.actionFilterState == 2) || (appState.migratorMode == MigratorMode.SYSTEMIZE && appState.actionFilterState == 2)) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onPrimaryContainer
                             ),
                             modifier = Modifier
                                 .height(52.dp)

@@ -65,7 +65,7 @@ class FindingsLineTest {
             )
         )
         val line = report.findingsLine()
-        assertTrue("names the file: $line", line.contains("Messages.shift"))
+        assertTrue("names the file: $line", line.contains("Messages.vault"))
         // And does NOT merely say "1 of 2".
         assertTrue("must not be a bare count: $line", !line.contains("1 of 2"))
     }
@@ -92,8 +92,8 @@ class FindingsLineTest {
         val line = report.findingsLine()
         assertTrue("unreadable section: $line", line.contains("unreadable device archives"))
         assertTrue("altered section: $line", line.contains("altered since written"))
-        assertTrue(line.contains("Messages.shift"))
-        assertTrue(line.contains("Wi-Fi.shift"))
+        assertTrue(line.contains("Messages.vault"))
+        assertTrue(line.contains("Wi-Fi.vault"))
     }
 
     @Test
@@ -119,7 +119,7 @@ class FindingsLineTest {
     fun `one finding reads as one, not as a list of one`() {
         val report = VerificationReport(deviceItems = listOf(device(DeviceDataItem.CALLS, ok = false)))
         val line = report.findingsLine()
-        assertTrue(line.contains("unreadable device archives: CallLogs.shift"))
+        assertTrue(line.contains("unreadable device archives: CallLogs.vault"))
         assertTrue("no empty plural: $line", !line.contains("archives: ,"))
     }
 
@@ -134,7 +134,7 @@ class FindingsLineTest {
         )
         val line = report.findingsLine()
         assertTrue("names a package: $line", line.contains("com.example.app"))
-        assertTrue("names an archive: $line", line.contains("Messages.shift"))
+        assertTrue("names an archive: $line", line.contains("Messages.vault"))
         assertTrue("no brace leaked: $line", !line.contains('{') && !line.contains('}'))
     }
 }

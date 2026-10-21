@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -40,11 +41,13 @@ import com.phoenix.droidvault.ui.theme.DvShapes
 import com.phoenix.droidvault.ui.theme.DvSpacing
 import com.phoenix.droidvault.ui.theme.dvAccent
 import com.phoenix.droidvault.ui.theme.dvContainer
+import com.phoenix.droidvault.ui.components.DvButton
 import com.phoenix.droidvault.ui.components.InfoBlock
 import com.phoenix.droidvault.ui.components.InfoButton
 import com.phoenix.droidvault.ui.components.InfoRow
 import com.phoenix.droidvault.ui.components.CompactNavRow
 import com.phoenix.droidvault.ui.components.CompactRuleCard
+import com.phoenix.droidvault.ui.components.CircularCheckbox
 import com.phoenix.droidvault.ui.components.DeviceDataSectionBody
 import com.phoenix.droidvault.ui.components.DiscardChangesDialog
 import com.phoenix.droidvault.ui.components.FolderSelectionSection
@@ -53,8 +56,12 @@ import com.phoenix.droidvault.ui.components.StickySaveBar
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Backup
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Contacts
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
@@ -64,7 +71,10 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -73,7 +83,7 @@ import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -120,6 +130,7 @@ import com.phoenix.droidvault.models.DeviceDataItem
 import com.phoenix.droidvault.models.FallbackPolicy
 import com.phoenix.droidvault.models.ScheduleType
 import com.phoenix.droidvault.models.displayName
+import com.phoenix.droidvault.models.previewLayout
 import com.phoenix.droidvault.ui.components.AppListItem
 import com.phoenix.droidvault.ui.components.DvEmptyState
 import com.phoenix.droidvault.ui.components.ShimmerAppListItem
@@ -291,10 +302,12 @@ private fun UnsavedChangesBanner(visible: Boolean) {
  * Shared configuration card for the Backup and Restore lists. One layout for
  * both so they can never drift apart again. Hierarchy, top to bottom:
  *  1. Op icon + name + operation badge (+ disabled hint) + enable switch.
- *  2. Summary line (matching apps / device data) + last-run line.
- *  3. Action row: Preview + Run share the width 50/50 so no label wraps;
- *     Duplicate/Delete live in the overflow menu. The whole card opens the
- *     editor.
+ *  2. Summary line (matching apps / device data) + last-run line. The Reset
+ *     for excluded apps rides on the summary line, beside the count it acts
+ *     on, so the action row keeps room for the primary's own label.
+ *  3. Action row: the secondary hugs its label and the primary fills what is
+ *     left, so no label is clipped; Duplicate/Delete live in the overflow
+ *     menu. The whole card opens the editor.
  */
 @Composable
 private fun ConfigCard(
@@ -314,6 +327,16 @@ private fun ConfigCard(
     onDelete: () -> Unit,
     onMoveUp: () -> Unit = {},
     onMoveDown: () -> Unit = {},
+    /**
+     * How many apps this configuration leaves alone, by name.
+     *
+     * Named on the card so that the Reset beside it acts on something the
+     * reader can see: a bare "Reset" on a card that says "8 apps" would be a
+     * question, and a card that says "8 apps · 2 excluded" makes it a fact.
+     */
+    excludedCount: Int = 0,
+    /** Shown only when there is something to reset. */
+    onResetExclusions: (() -> Unit)? = null,
     lastRunText: String? = null
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -387,13 +410,33 @@ private fun ConfigCard(
                 Switch(checked = enabled, onCheckedChange = onEnabledChange)
             }
             Spacer(modifier = Modifier.height(10.dp))
-            Text(
-                summary,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
+            // The Reset sits BESIDE the count it acts on, not in the action row.
+            //
+            // Three actions do not fit across this card: the row is 379 dp
+            // wide, and the third one took the primary's own label past the
+            // edge — "Run backup" was clipped to "Run bac", while the cards
+            // without a Reset showed it in full. A button the reader has to
+            // decode is a control that reads as broken, so the tertiary action
+            // moved up here, where the count it resets is named.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (excludedCount > 0 && onResetExclusions != null) {
+                    TextButton(
+                        onClick = onResetExclusions,
+                        enabled = enabled,
+                        contentPadding = ButtonDefaults.TextButtonContentPadding
+                    ) {
+                        Text("Reset", maxLines = 1, softWrap = false)
+                    }
+                }
+            }
             lastRunText?.let {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -409,16 +452,24 @@ private fun ConfigCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                // The SECONDARY actions hug their labels; the primary fills what
+                // is left. Both buttons used to be `weight(1f)`, which made each
+                // of them three times wider than its text and left no room for
+                // a third action. The primary is still the anchor, and the ⋮ is
+                // still pinned to the right.
                 OutlinedButton(
                     onClick = onPreview,
                     enabled = enabled,
-                    modifier = Modifier.weight(1f)
+                    contentPadding = ButtonDefaults.ContentPadding
                 ) {
                     Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(16.dp))
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("Preview", maxLines = 1, softWrap = false)
                 }
-                Button(
+                // The Reset for excluded apps is NOT here — it sits on the
+                // summary line above, beside the count it acts on. Three
+                // actions do not fit across this card.
+                DvButton(
                     onClick = if (isThisRunning) onCancel else onRun,
                     enabled = isThisRunning || runEnabled,
                     modifier = Modifier.weight(1f)
@@ -495,7 +546,7 @@ fun AutomateTab(
     autoState.second?.let { err ->
         AlertDialog(
             onDismissRequest = { autoViewModel.clearError() },
-            confirmButton = { Button(onClick = { autoViewModel.clearError() }) { Text("OK") } },
+            confirmButton = { DvButton(onClick = { autoViewModel.clearError() }) { Text("OK") } },
             title = { Text("Automation") },
             text = { Text(err) },
             shape = DvShapes.card
@@ -529,7 +580,7 @@ private fun AutoMenu(viewModel: AutomationViewModel, appList: List<AppInfo>) {
         AlertDialog(
             onDismissRequest = { viewModel.dismissStateBackup() },
             confirmButton = {
-                Button(onClick = { viewModel.restoreStateBackup() }) { Text("Restore") }
+                DvButton(onClick = { viewModel.restoreStateBackup() }) { Text("Restore") }
             },
             dismissButton = {
                 OutlinedButton(onClick = { viewModel.dismissStateBackup() }) { Text("Skip") }
@@ -716,7 +767,7 @@ private fun LabelsScreen(viewModel: AutomationViewModel, appList: List<AppInfo>)
             placeholder = { Text("Search labels...") }
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Button(
+        DvButton(
             onClick = { newName = ""; showCreate = true },
             shape = CircleShape
         ) {
@@ -768,7 +819,7 @@ private fun LabelsScreen(viewModel: AutomationViewModel, appList: List<AppInfo>)
         AlertDialog(
             onDismissRequest = { showCreate = false },
             confirmButton = {
-                Button(onClick = { viewModel.createLabel(newName); showCreate = false }) { Text("Create") }
+                DvButton(onClick = { viewModel.createLabel(newName); showCreate = false }) { Text("Create") }
             },
             dismissButton = { OutlinedButton(onClick = { showCreate = false }) { Text("Cancel") } },
             title = { Text("New label") },
@@ -787,7 +838,7 @@ private fun LabelsScreen(viewModel: AutomationViewModel, appList: List<AppInfo>)
         AlertDialog(
             onDismissRequest = { renameId = null },
             confirmButton = {
-                Button(onClick = { viewModel.renameLabel(renameId!!, renameText); renameId = null }) { Text("Rename") }
+                DvButton(onClick = { viewModel.renameLabel(renameId!!, renameText); renameId = null }) { Text("Rename") }
             },
             dismissButton = { OutlinedButton(onClick = { renameId = null }) { Text("Cancel") } },
             title = { Text("Rename label") },
@@ -801,7 +852,13 @@ private fun LabelsScreen(viewModel: AutomationViewModel, appList: List<AppInfo>)
         AlertDialog(
             onDismissRequest = { deleteId = null },
             confirmButton = {
-                Button(onClick = { viewModel.deleteLabel(deleteId!!); deleteId = null }) { Text("Delete") }
+                DvButton(
+                    onClick = { viewModel.deleteLabel(deleteId!!); deleteId = null },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) { Text("Delete") }
             },
             dismissButton = { OutlinedButton(onClick = { deleteId = null }) { Text("Cancel") } },
             title = { Text("Delete label?") },
@@ -844,7 +901,7 @@ private fun LabelDetailScreen(
         Spacer(modifier = Modifier.height(8.dp))
         if (!assignMode) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
+                DvButton(
                     onClick = { selected = emptySet(); assignMode = true },
                     shape = CircleShape
                 ) { Text("Assign apps") }
@@ -919,7 +976,7 @@ private fun LabelDetailScreen(
             )
             Spacer(modifier = Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
+                DvButton(
                     // Clear the selection only once the single bulk write has landed, so a
                     // failed persist cannot leave the user looking at an empty
                     // selection with nothing assigned.
@@ -1005,7 +1062,7 @@ private fun LabelDetailScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(
+                    DvButton(
                         onClick = { mainViewModel.ensureInstalledApps() },
                         shape = CircleShape
                     ) { Text("Reload apps") }
@@ -1078,7 +1135,7 @@ private fun ConfigsEmptyState(isRestore: Boolean, onCreate: () -> Unit) {
                 "your FULL label every night."
         },
         action = {
-            Button(onClick = onCreate, shape = CircleShape) {
+            DvButton(onClick = onCreate, shape = CircleShape) {
                 Icon(Icons.Default.Add, null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(if (isRestore) "New restore configuration" else "New backup configuration")
@@ -1107,7 +1164,7 @@ private fun ConfigsScreen(
         )
         Spacer(modifier = Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.newConfig() }, shape = CircleShape) {
+            DvButton(onClick = { viewModel.newConfig() }, shape = CircleShape) {
                 Icon(Icons.Default.Add, null)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("New backup configuration")
@@ -1130,11 +1187,25 @@ private fun ConfigsScreen(
                 ConfigCard(
                     title = cfg.name.ifEmpty { "(unnamed)" },
                     summary = buildString {
-                        append(matchCount)
-                        append(if (matchCount == 1) " app" else " apps")
-                        deviceDataSummary(cfg)?.let {
-                            append(" • ")
+                        // A configuration that covers no apps says so by NOT
+                        // stating an app count: "0 apps • Messages • Calls"
+                        // describes a configuration that has no app part at all
+                        // as though it were one that failed to match any.
+                        val deviceSummary = deviceDataSummary(cfg)
+                        if (cfg.coversApps || deviceSummary == null) {
+                            append(matchCount)
+                            append(if (matchCount == 1) " app" else " apps")
+                        }
+                        deviceSummary?.let {
+                            if (isNotEmpty()) append(" • ")
                             append(it)
+                        }
+                        // Named on the card, so the Reset beside it acts on
+                        // something the reader can see.
+                        if (cfg.excludedPackages.isNotEmpty()) {
+                            append(" • ")
+                            append(cfg.excludedPackages.size)
+                            append(" excluded")
                         }
                     },
                     isRestore = false,
@@ -1157,6 +1228,8 @@ private fun ConfigsScreen(
                     onDelete = { deleteId = cfg.id },
                     onMoveUp = { viewModel.moveConfig(cfg.id, up = true) },
                     onMoveDown = { viewModel.moveConfig(cfg.id, up = false) },
+                    excludedCount = cfg.excludedPackages.size,
+                    onResetExclusions = { viewModel.clearConfigExclusions(cfg.id) },
                     lastRunText = viewModel.lastRunLabel(cfg.id, cfg.name, isRestore = false)
                 )
             }
@@ -1166,7 +1239,13 @@ private fun ConfigsScreen(
         AlertDialog(
             onDismissRequest = { deleteId = null },
             confirmButton = {
-                Button(onClick = { viewModel.deleteConfig(deleteId!!); deleteId = null }) { Text("Delete") }
+                DvButton(
+                    onClick = { viewModel.deleteConfig(deleteId!!); deleteId = null },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) { Text("Delete") }
             },
             dismissButton = { OutlinedButton(onClick = { deleteId = null }) { Text("Cancel") } },
             title = { Text("Delete configuration?") },
@@ -1199,7 +1278,7 @@ private fun RestoreConfigsScreen(
         )
         Spacer(modifier = Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.newRestoreConfig() }, shape = CircleShape) {
+            DvButton(onClick = { viewModel.newRestoreConfig() }, shape = CircleShape) {
                 Icon(Icons.Default.Add, null)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("New restore configuration")
@@ -1233,12 +1312,29 @@ private fun RestoreConfigsScreen(
                     ConfigCard(
                         title = cfg.name.ifEmpty { "(unnamed)" },
                         summary = buildString {
-                            append(state.restoreApps.count { it.availableInBackup.isNotEmpty() })
-                            append(" app backups on device")
-                            deviceDataSummary(cfg)?.let {
-                                append(" • ")
+                            // The count is the VAULT's, not this
+                            // configuration's — so a configuration that covers
+                            // no apps does not state it at all. "110 app
+                            // backups on device • Messages • Calls" on a
+                            // device-data configuration described a
+                            // configuration that restores 110 apps.
+                            val deviceSummary = deviceDataSummary(cfg)
+                            if (cfg.coversApps) {
+                                append(state.restoreApps.count { it.availableInBackup.isNotEmpty() })
+                                append(" app backups on device")
+                            }
+                            deviceSummary?.let {
+                                if (isNotEmpty()) append(" • ")
                                 append(it)
                             }
+                            if (cfg.excludedPackages.isNotEmpty()) {
+                                append(" • ")
+                                append(cfg.excludedPackages.size)
+                                append(" excluded")
+                            }
+                            // A configuration with nothing in it still has to
+                            // say so: an empty line is not a summary.
+                            if (isEmpty()) append("Nothing selected")
                         },
                         isRestore = true,
                         enabled = cfg.enabled,
@@ -1260,6 +1356,8 @@ private fun RestoreConfigsScreen(
                         onDelete = { deleteId = cfg.id },
                         onMoveUp = { viewModel.moveConfig(cfg.id, up = true) },
                         onMoveDown = { viewModel.moveConfig(cfg.id, up = false) },
+                        excludedCount = cfg.excludedPackages.size,
+                        onResetExclusions = { viewModel.clearConfigExclusions(cfg.id) },
                         lastRunText = viewModel.lastRunLabel(cfg.id, cfg.name, isRestore = true)
                     )
                 }
@@ -1271,7 +1369,13 @@ private fun RestoreConfigsScreen(
         AlertDialog(
             onDismissRequest = { deleteId = null },
             confirmButton = {
-                Button(onClick = { viewModel.deleteRestoreConfig(deleteId!!); deleteId = null }) { Text("Delete") }
+                DvButton(
+                    onClick = { viewModel.deleteRestoreConfig(deleteId!!); deleteId = null },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) { Text("Delete") }
             },
             dismissButton = { OutlinedButton(onClick = { deleteId = null }) { Text("Cancel") } },
             title = { Text("Delete restore configuration?") },
@@ -1460,6 +1564,22 @@ private fun RestoreEditorScreen(viewModel: AutomationViewModel) {
             }
         }
 
+        // ---- Apps this configuration leaves alone, one by one ----
+        item {
+            InfoRow(
+                title = "Excluded apps",
+                value = if (cfg.excludedPackages.isEmpty()) {
+                    "none — switch an app off in the preview to exclude it"
+                } else {
+                    "${cfg.excludedPackages.size} — switch them back on in the preview"
+                },
+                isPrimary = cfg.excludedPackages.isNotEmpty(),
+                info = "Apps named one by one that this configuration will not touch, " +
+                    "even though a label covers them. Set in the dry run, and saved. " +
+                    "The configuration list carries a Reset for them."
+            )
+        }
+
         // ---- Advanced: collapsed by default (spec §16) ----
         item {
             AdvancedSection(
@@ -1553,25 +1673,32 @@ private fun RestorePreviewScreen(viewModel: AutomationViewModel) {
         LaunchedEffect(Unit) { viewModel.setMode(AutoMode.RESTORE_CONFIGS) }
         return
     }
+    // What this preview shows is decided in ONE place (models/PreviewLayout.kt),
+    // because the backup and restore previews are two screens rendering the
+    // same kind of answer and a rule written twice drifts silently.
+    val layout = previewLayout(plan, ConfigOperation.RESTORE)
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         TitleRow("Dry run: ${plan.configName}")
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            "${plan.processable.size} restorable • ${plan.skipped.size} skipped • ${plan.withUnavailable.size} with unavailable components",
+            layout.headline,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            "Nothing was modified. This is a preview only.",
+            layout.note,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Button(
+        DvButton(
             onClick = {
                 state.restorePreviewConfigId?.let { viewModel.runRestoreConfig(it, state.restoreApps) }
             },
-            enabled = !state.isRunning && plan.processable.isNotEmpty(),
+            // A configuration that only does device data has no app in its
+            // plan, and the button used to be enabled on the app count alone
+            // — so the preview of "Device Data Restore" could not start it.
+            enabled = !state.isRunning && layout.canRun,
             shape = CircleShape
         ) {
             Text("Run restore now")
@@ -1601,53 +1728,70 @@ private fun RestorePreviewScreen(viewModel: AutomationViewModel) {
         Spacer(modifier = Modifier.height(8.dp))
         val byPkg = remember(state.restoreApps) { state.restoreApps.associateBy { it.packageName } }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            val ready = plan.processable
-            val skipped = plan.skipped
-            if (ready.isNotEmpty()) {
+            if (layout.showDeviceData) {
                 item {
-                    Text(
-                        "Ready for restore (${ready.size}) — tap for details",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary
+                    PreviewDeviceDataHeader(
+                        count = layout.deviceData.size,
+                        isRestore = true
                     )
                 }
-                items(ready, key = { it.packageName }) { e ->
-                    Box(
-                        modifier = Modifier.clickable {
-                            viewModel.openDetail(e.packageName, state.restoreApps, AutoMode.RESTORE_PREVIEW)
+                items(layout.deviceData, key = { "d-" + it.name }) { item ->
+                    PreviewDeviceDataRow(item = item, folders = layout.folders)
+                }
+            }
+            if (layout.showApps) {
+                val ready = plan.processable
+                val excluded = plan.excluded
+                if (ready.isNotEmpty()) {
+                    item {
+                        Text(
+                            "Ready for restore (${ready.size}) — tap for details",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    items(ready, key = { it.packageName }) { e ->
+                        Box(
+                            modifier = Modifier.clickable {
+                                viewModel.openDetail(e.packageName, state.restoreApps, AutoMode.RESTORE_PREVIEW)
+                            }
+                        ) {
+                            PreviewAppRow(
+                                entryLabel = e.label.ifEmpty { e.packageName },
+                                packageName = e.packageName,
+                                app = byPkg[e.packageName],
+                                status = e.granted.sortedBy { it.engineId }.joinToString(" + ") { compShort(it) },
+                                ok = true,
+                                included = true,
+                                onToggle = { viewModel.toggleConfigExclusion(e.packageName) }
+                            )
                         }
-                    ) {
+                    }
+                }
+                if (excluded.isNotEmpty()) {
+                    item {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "Excluded (${excluded.size}) — this configuration leaves them alone",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        PreviewNote("Switch one back on to include it again.")
+                    }
+                    items(excluded, key = { it.packageName }) { e ->
                         PreviewAppRow(
                             entryLabel = e.label.ifEmpty { e.packageName },
                             packageName = e.packageName,
                             app = byPkg[e.packageName],
-                            status = e.granted.sortedBy { it.engineId }.joinToString(" + ") { compShort(it) },
-                            ok = true
+                            status = e.skipReason.ifEmpty { "excluded" },
+                            ok = false,
+                            included = false,
+                            onToggle = { viewModel.toggleConfigExclusion(e.packageName) }
                         )
                     }
                 }
             }
-            if (skipped.isNotEmpty()) {
-                item {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "Skipped (${skipped.size})",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    SectionTitleCompact("Assign these apps a matching label, or change the fallback, to include them.")
-                }
-                items(skipped, key = { it.packageName }) { e ->
-                    PreviewAppRow(
-                        entryLabel = e.label.ifEmpty { e.packageName },
-                        packageName = e.packageName,
-                        app = byPkg[e.packageName],
-                        status = e.skipReason.ifEmpty { "skipped" },
-                        ok = false
-                    )
-                }
-            }
-            if (plan.withUnavailable.isNotEmpty()) {
+            if (layout.showApps && plan.withUnavailable.isNotEmpty()) {
                 item {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
@@ -1662,7 +1806,7 @@ private fun RestorePreviewScreen(viewModel: AutomationViewModel) {
                         Text(
                             "Tip: enable them in Settings → Safety Consents, then preview again.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                     }
@@ -1680,6 +1824,15 @@ private fun RestorePreviewScreen(viewModel: AutomationViewModel) {
                         status = "unavailable: $reasonText",
                         ok = false
                     )
+                }
+            }
+            // The apps this configuration does NOT cover. They were a list —
+            // 336 rows of "no matching rule" for a configuration covering eight
+            // apps — and the number was the only thing in them worth keeping.
+            layout.uncoveredNote?.let { note ->
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    PreviewNote(note)
                 }
             }
         }
@@ -1848,6 +2001,22 @@ private fun ConfigEditorScreen(viewModel: AutomationViewModel) {
             }
         }
 
+        // ---- Apps this configuration leaves alone, one by one ----
+        item {
+            InfoRow(
+                title = "Excluded apps",
+                value = if (cfg.excludedPackages.isEmpty()) {
+                    "none — switch an app off in the preview to exclude it"
+                } else {
+                    "${cfg.excludedPackages.size} — switch them back on in the preview"
+                },
+                isPrimary = cfg.excludedPackages.isNotEmpty(),
+                info = "Apps named one by one that this configuration will not touch, " +
+                    "even though a label covers them. Set in the dry run, and saved. " +
+                    "The configuration list carries a Reset for them."
+            )
+        }
+
         // ---- Advanced: collapsed by default (spec §16) ----
         item {
             AdvancedSection(
@@ -1942,25 +2111,31 @@ private fun PreviewScreen(viewModel: AutomationViewModel, appList: List<AppInfo>
         LaunchedEffect(Unit) { viewModel.setMode(AutoMode.CONFIGS) }
         return
     }
+    // One decision, one place — see models/PreviewLayout.kt. The restore
+    // preview renders the same object, so the two screens cannot answer
+    // differently.
+    val layout = previewLayout(plan, ConfigOperation.BACKUP)
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         TitleRow("Dry run: ${plan.configName}")
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            "${plan.processable.size} processable • ${plan.skipped.size} skipped • ${plan.withUnavailable.size} with unavailable components",
+            layout.headline,
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text(
-            "Nothing was modified. This is a preview only.",
+            layout.note,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(modifier = Modifier.height(8.dp))
-        Button(
+        DvButton(
             onClick = {
                 state.previewConfigId?.let { viewModel.runConfig(it, appList) }
             },
-            enabled = !state.isRunning && plan.processable.isNotEmpty(),
+            // A device-data configuration has no app in its plan, and the
+            // button used to be enabled on the app count alone.
+            enabled = !state.isRunning && layout.canRun,
             shape = CircleShape
         ) {
             Text("Run backup now")
@@ -1990,53 +2165,70 @@ private fun PreviewScreen(viewModel: AutomationViewModel, appList: List<AppInfo>
         Spacer(modifier = Modifier.height(8.dp))
         val byPkg = remember(appList) { appList.associateBy { it.packageName } }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            val ready = plan.processable
-            val skipped = plan.skipped
-            if (ready.isNotEmpty()) {
+            if (layout.showDeviceData) {
                 item {
-                    Text(
-                        "Ready for backup (${ready.size}) — tap for details",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary
+                    PreviewDeviceDataHeader(
+                        count = layout.deviceData.size,
+                        isRestore = false
                     )
                 }
-                items(ready, key = { it.packageName }) { e ->
-                    Box(
-                        modifier = Modifier.clickable {
-                            viewModel.openDetail(e.packageName, appList, AutoMode.PREVIEW)
+                items(layout.deviceData, key = { "d-" + it.name }) { item ->
+                    PreviewDeviceDataRow(item = item, folders = layout.folders)
+                }
+            }
+            if (layout.showApps) {
+                val ready = plan.processable
+                val excluded = plan.excluded
+                if (ready.isNotEmpty()) {
+                    item {
+                        Text(
+                            "Ready for backup (${ready.size}) — tap for details",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    items(ready, key = { it.packageName }) { e ->
+                        Box(
+                            modifier = Modifier.clickable {
+                                viewModel.openDetail(e.packageName, appList, AutoMode.PREVIEW)
+                            }
+                        ) {
+                            PreviewAppRow(
+                                entryLabel = e.label.ifEmpty { e.packageName },
+                                packageName = e.packageName,
+                                app = byPkg[e.packageName],
+                                status = e.granted.sortedBy { it.engineId }.joinToString(" + ") { compShort(it) },
+                                ok = true,
+                                included = true,
+                                onToggle = { viewModel.toggleConfigExclusion(e.packageName) }
+                            )
                         }
-                    ) {
+                    }
+                }
+                if (excluded.isNotEmpty()) {
+                    item {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "Excluded (${excluded.size}) — this configuration leaves them alone",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        PreviewNote("Switch one back on to include it again.")
+                    }
+                    items(excluded, key = { it.packageName }) { e ->
                         PreviewAppRow(
                             entryLabel = e.label.ifEmpty { e.packageName },
                             packageName = e.packageName,
                             app = byPkg[e.packageName],
-                            status = e.granted.sortedBy { it.engineId }.joinToString(" + ") { compShort(it) },
-                            ok = true
+                            status = e.skipReason.ifEmpty { "excluded" },
+                            ok = false,
+                            included = false,
+                            onToggle = { viewModel.toggleConfigExclusion(e.packageName) }
                         )
                     }
                 }
             }
-            if (skipped.isNotEmpty()) {
-                item {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "Skipped (${skipped.size})",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    SectionTitleCompact("Assign these apps a matching label, or change the fallback, to include them.")
-                }
-                items(skipped, key = { it.packageName }) { e ->
-                    PreviewAppRow(
-                        entryLabel = e.label.ifEmpty { e.packageName },
-                        packageName = e.packageName,
-                        app = byPkg[e.packageName],
-                        status = e.skipReason.ifEmpty { "skipped" },
-                        ok = false
-                    )
-                }
-            }
-            if (plan.withUnavailable.isNotEmpty()) {
+            if (layout.showApps && plan.withUnavailable.isNotEmpty()) {
                 item {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
@@ -2051,7 +2243,7 @@ private fun PreviewScreen(viewModel: AutomationViewModel, appList: List<AppInfo>
                         Text(
                             "Tip: enable them in Settings → Safety Consents, then preview again.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                     }
@@ -2071,8 +2263,116 @@ private fun PreviewScreen(viewModel: AutomationViewModel, appList: List<AppInfo>
                     )
                 }
             }
+            // The apps this configuration does NOT cover: a count, not a list
+            // of 336 identical rows.
+            layout.uncoveredNote?.let { note ->
+                item {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    PreviewNote(note)
+                }
+            }
         }
     }
+}
+
+/**
+ * A note inside a dry run.
+ *
+ * The reading colour, not the accent: §2.100 took the preview's prose off the
+ * link colour, and the one line that was still on it — "Switch one back on
+ * to include it again." — meant the screen's claim that "the only accent left
+ * is the Run button" was not true.
+ */
+@Composable
+private fun PreviewNote(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+}
+
+/**
+ * The device-data half of a dry run.
+ *
+ * A configuration that carries device data does that on every run, and the
+ * preview has to say so: `Device Data Backup` carries three items and no app
+ * rules, and its preview used to show nothing but the 344 apps it does not
+ * cover — a preview of nothing, under a headline that read "0 processable".
+ */
+@Composable
+private fun PreviewDeviceDataHeader(count: Int, isRestore: Boolean) {
+    Text(
+        "Device data ($count)",
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
+    )
+    PreviewNote(
+        if (isRestore) {
+            "Restored on every run of this configuration."
+        } else {
+            "Backed up on every run of this configuration."
+        }
+    )
+}
+
+/** One device-data item in a dry run, with the icon that names it. */
+@Composable
+private fun PreviewDeviceDataRow(item: DeviceDataItem, folders: List<String>) {
+    ElevatedCard(shape = RoundedCornerShape(12.dp)) {
+        Row(
+            modifier = Modifier.padding(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    deviceDataIcon(item),
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    item.label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1
+                )
+                Text(
+                    // The vault file that carries this item, except for
+                    // folders — where the paths are the thing worth naming.
+                    if (item == DeviceDataItem.FOLDERS && folders.isNotEmpty()) {
+                        folders.joinToString(", ") { BackupConfigFolders.shortDisplayName(it) }
+                    } else {
+                        item.archiveFile
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+/** The icon that names each device-data item. */
+private fun deviceDataIcon(item: DeviceDataItem): ImageVector = when (item) {
+    DeviceDataItem.MESSAGES -> Icons.Default.Sms
+    DeviceDataItem.CALLS -> Icons.Default.Call
+    DeviceDataItem.CONTACTS -> Icons.Default.Contacts
+    DeviceDataItem.WIFI -> Icons.Default.Wifi
+    DeviceDataItem.WALLPAPER -> Icons.Default.Wallpaper
+    DeviceDataItem.BLUETOOTH -> Icons.Default.Bluetooth
+    DeviceDataItem.FOLDERS -> Icons.Default.Folder
 }
 
 @Composable
@@ -2081,7 +2381,15 @@ private fun PreviewAppRow(
     packageName: String,
     app: AppInfo?,
     status: String,
-    ok: Boolean
+    ok: Boolean,
+    /**
+     * The switch that includes or excludes this app in the configuration.
+     *
+     * Null for the rows the user cannot decide here: an app with no matching
+     * rule is the configuration's FALLBACK policy's business, not a switch's.
+     */
+    included: Boolean? = null,
+    onToggle: (() -> Unit)? = null
 ) {
     ElevatedCard(shape = RoundedCornerShape(12.dp)) {
         Row(
@@ -2128,9 +2436,32 @@ private fun PreviewAppRow(
                 Text(
                     status,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    // The component list is a value, not a link: the accent here
+                    // read as tappable text on a card that is not. ok rows read at
+                    // full strength, skipped/unavailable rows are dimmed — the
+                    // distinction survives without the link colour (§2.91).
+                    color = if (ok) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2
                 )
+            }
+            if (included != null && onToggle != null) {
+                // 48 dp, because the switch is the only control on this card and
+                // a 24 dp target is a target people miss.
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .clickable(
+                            onClickLabel = if (included) {
+                                "Leave this app out of this configuration"
+                            } else {
+                                "Include this app in this configuration"
+                            }
+                        ) { onToggle() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularCheckbox(checked = included, onCheckedChange = null)
+                }
             }
         }
     }
@@ -2199,7 +2530,7 @@ private fun HistoryScreen(viewModel: AutomationViewModel) {
         )
         Spacer(modifier = Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { viewModel.exportToFile() }, shape = CircleShape) {
+            DvButton(onClick = { viewModel.exportToFile() }, shape = CircleShape) {
                 Text("Export")
             }
             OutlinedButton(onClick = { picker.launch("application/json") }) {
@@ -2232,10 +2563,15 @@ private fun HistoryScreen(viewModel: AutomationViewModel) {
             AlertDialog(
                 onDismissRequest = { showClearConfirm = false },
                 confirmButton = {
-                    Button(onClick = {
+                    DvButton(onClick = {
                         viewModel.clearHistory()
                         showClearConfirm = false
-                    }) { Text("Clear") }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) { Text("Clear") }
                 },
                 dismissButton = {
                     OutlinedButton(onClick = { showClearConfirm = false }) { Text("Cancel") }
@@ -2514,7 +2850,7 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
                         )
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    Button(
+                    DvButton(
                         onClick = { viewModel.runAllScheduled(appList) },
                         enabled = state.masterEnabled && !state.isRunning &&
                             state.schedules.any { it.enabled },
@@ -2673,7 +3009,7 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
                                 AlertDialog(
                                     onDismissRequest = { showTimePicker = false },
                                     confirmButton = {
-                                        Button(onClick = {
+                                        DvButton(onClick = {
                                             viewModel.updateEditingSchedule(
                                                 editing.copy(hour = timeState.hour, minute = timeState.minute)
                                             )
@@ -2771,7 +3107,7 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
                                 androidx.compose.material3.DatePickerDialog(
                                     onDismissRequest = { showDatePicker = false },
                                     confirmButton = {
-                                        Button(onClick = {
+                                        DvButton(onClick = {
                                             dateState.selectedDateMillis?.let { picked ->
                                                 val c = java.util.Calendar.getInstance()
                                                     .apply { timeInMillis = editing.triggerAtMillis.takeIf { it > 0 } ?: System.currentTimeMillis() }
@@ -2807,7 +3143,7 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
                                 AlertDialog(
                                     onDismissRequest = { showOnceTimePicker = false },
                                     confirmButton = {
-                                        Button(onClick = {
+                                        DvButton(onClick = {
                                             val c = java.util.Calendar.getInstance().apply {
                                                 timeInMillis = editing.triggerAtMillis.takeIf { it > 0 } ?: System.currentTimeMillis()
                                                 set(java.util.Calendar.HOUR_OF_DAY, onceTimeState.hour)
@@ -2873,7 +3209,7 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
                             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Button(
+                            DvButton(
                                 onClick = { viewModel.saveEditingSchedule() },
                                 enabled = errors.isEmpty(),
                                 shape = CircleShape
@@ -2914,7 +3250,7 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
                         }
                     }
                 } else {
-                    Button(
+                    DvButton(
                         onClick = {
                             viewModel.newSchedule(
                                 listOfNotNull(state.configs.firstOrNull()?.id)
@@ -2967,7 +3303,13 @@ private fun SchedulesScreen(viewModel: AutomationViewModel, appList: List<AppInf
         AlertDialog(
             onDismissRequest = { deleteId = null },
             confirmButton = {
-                Button(onClick = { viewModel.deleteSchedule(deleteId!!); deleteId = null }) { Text("Delete") }
+                DvButton(
+                    onClick = { viewModel.deleteSchedule(deleteId!!); deleteId = null },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                ) { Text("Delete") }
             },
             dismissButton = { OutlinedButton(onClick = { deleteId = null }) { Text("Cancel") } },
             title = { Text("Delete schedule?") },
@@ -3259,12 +3601,12 @@ private fun AppDetailScreen(viewModel: AutomationViewModel, appList: List<AppInf
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (app.isLaunchable) {
-                    Button(
+                    DvButton(
                         onClick = { viewModel.launchApp(context, app.packageName) },
                         shape = CircleShape
                     ) { Text("Launch") }
                 }
-                Button(
+                DvButton(
                     onClick = { viewModel.toggleFreeze(app.packageName, appList) },
                     shape = CircleShape
                 ) { Text(if (detail.frozen) "Unfreeze" else "Freeze") }

@@ -710,13 +710,13 @@ mod tests {
     fn the_walk_indexes_archives_device_data_and_mirrors() {
         let base = tmp("walk");
         touch(&base.join("Apps/User/Drive/Meta.txt"), b"Name=Drive\n");
-        touch(&base.join("Apps/User/Drive/App.shift"), b"archive");
+        touch(&base.join("Apps/User/Drive/App.vault"), b"archive");
         touch(&base.join("Apps/System/Gms/Meta.txt"), b"Name=Gms\n");
-        touch(&base.join("Apps/System/Gms/Data.shift"), b"archive");
+        touch(&base.join("Apps/System/Gms/Data.vault"), b"archive");
         // A System directory with no Meta.txt is not a backup (see verify), so it
         // must not be indexed as one either.
-        touch(&base.join("Apps/System/Orphan/Data.shift"), b"archive");
-        touch(&base.join("Device/Messages.shift"), b"archive");
+        touch(&base.join("Apps/System/Orphan/Data.vault"), b"archive");
+        touch(&base.join("Device/Messages.vault"), b"archive");
         touch(&base.join("DroidVault.apk"), b"apk");
         touch(&base.join("automation-state.json"), b"{}");
 
@@ -724,11 +724,11 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                "Apps/System/Gms/Data.shift".to_string(),
+                "Apps/System/Gms/Data.vault".to_string(),
                 "Apps/System/Gms/Meta.txt".to_string(),
-                "Apps/User/Drive/App.shift".to_string(),
+                "Apps/User/Drive/App.vault".to_string(),
                 "Apps/User/Drive/Meta.txt".to_string(),
-                "Device/Messages.shift".to_string(),
+                "Device/Messages.vault".to_string(),
                 "DroidVault.apk".to_string(),
                 "automation-state.json".to_string(),
             ]
@@ -743,11 +743,11 @@ mod tests {
         // matched neither skip suffix — so it was indexed, counted in `ENTRIES`,
         // and could be reported UNLISTED: a second record of a digest that
         // nothing reads, standing in for a file the user never lost.
-        assert!(skippable("App.shift.sha256.new"));
-        assert!(skippable("Messages.shift.sha256"));
-        assert!(skippable("App.shift.tmp"));
+        assert!(skippable("App.vault.sha256.new"));
+        assert!(skippable("Messages.vault.sha256"));
+        assert!(skippable("App.vault.tmp"));
         // The archive itself is still indexed — only its records are skipped.
-        assert!(!skippable("App.shift"));
+        assert!(!skippable("App.vault"));
     }
 
     #[test]
@@ -756,31 +756,31 @@ mod tests {
         // `indexable` also rejected any path CONTAINING `..`, which silently
         // excluded the whole app directory from the index — so `--check-manifest`
         // could never report one of its archives missing or changed.
-        assert!(indexable("Apps/User/foo..bar/Data.shift"));
+        assert!(indexable("Apps/User/foo..bar/Data.vault"));
         assert!(indexable("Apps/User/Node.js/Meta.txt"));
         // Traversal is still refused, by the per-component rule: `..` is a
         // component that starts with a dot.
-        assert!(!indexable("Apps/User/../evil/Data.shift"));
+        assert!(!indexable("Apps/User/../evil/Data.vault"));
         assert!(!indexable("../etc/passwd"));
         assert!(!indexable("Apps/User/.."));
-        assert!(!indexable("Apps/User/.hidden/Data.shift"));
+        assert!(!indexable("Apps/User/.hidden/Data.vault"));
     }
 
     #[test]
     fn the_walk_ignores_what_is_not_the_vault() {
         let base = tmp("skip");
         touch(&base.join("Apps/User/Drive/Meta.txt"), b"Name=Drive\n");
-        touch(&base.join("Apps/User/Drive/App.shift"), b"archive");
+        touch(&base.join("Apps/User/Drive/App.vault"), b"archive");
         // In-flight temp: not part of the vault yet.
-        touch(&base.join("Apps/User/Drive/Data.shift.tmp"), b"half");
+        touch(&base.join("Apps/User/Drive/Data.vault.tmp"), b"half");
         // A sidecar describes another file; it is not one.
-        touch(&base.join("Apps/User/Drive/App.shift.sha256"), b"deadbeef");
+        touch(&base.join("Apps/User/Drive/App.vault.sha256"), b"deadbeef");
         // Half-written directory from a killed run: not a backup (see verify).
-        touch(&base.join("Apps/User/Partial/App.shift"), b"archive");
+        touch(&base.join("Apps/User/Partial/App.vault"), b"archive");
         // User data (folders to back up), not an archive of ours.
         touch(&base.join("Device/Folders/DCIM/photo.jpg"), b"jpeg");
         // A quarantine batch is not the good copy.
-        touch(&base.join(".trash/b1/Device/Messages.shift"), b"archive");
+        touch(&base.join(".trash/b1/Device/Messages.vault"), b"archive");
         // A user's stray file at the vault root.
         touch(&base.join("notes.txt"), b"hello");
         touch(&base.join(".nomedia"), b"");
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                "Apps/User/Drive/App.shift".to_string(),
+                "Apps/User/Drive/App.vault".to_string(),
                 "Apps/User/Drive/Meta.txt".to_string(),
             ]
         );
@@ -801,14 +801,14 @@ mod tests {
     fn the_digest_comes_from_the_sidecar_and_only_when_one_exists() {
         let base = tmp("sidecar");
         touch(&base.join("Apps/User/Drive/Meta.txt"), b"Name=Drive\n");
-        touch(&base.join("Apps/User/Drive/App.shift"), b"archive");
+        touch(&base.join("Apps/User/Drive/App.vault"), b"archive");
         touch(
-            &base.join("Apps/User/Drive/App.shift.sha256"),
-            format!("{DIGEST}  App.shift\n").as_bytes(),
+            &base.join("Apps/User/Drive/App.vault.sha256"),
+            format!("{DIGEST}  App.vault\n").as_bytes(),
         );
-        touch(&base.join("Apps/User/Drive/Data.shift"), b"archive");
+        touch(&base.join("Apps/User/Drive/Data.vault"), b"archive");
         touch(
-            &base.join("Apps/User/Drive/Data.shift.sha256"),
+            &base.join("Apps/User/Drive/Data.vault.sha256"),
             b"not a digest at all\n",
         );
 
@@ -823,11 +823,11 @@ mod tests {
                 .clone()
         };
         assert_eq!(
-            digest("Apps/User/Drive/App.shift"),
+            digest("Apps/User/Drive/App.vault"),
             Some(DIGEST.to_string())
         );
         assert_eq!(
-            digest("Apps/User/Drive/Data.shift"),
+            digest("Apps/User/Drive/Data.vault"),
             None,
             "a garbled sidecar records nothing rather than a wrong digest"
         );
@@ -841,13 +841,13 @@ mod tests {
             generated: 1_700_000_000,
             entries: vec![
                 Entry {
-                    path: "Apps/User/Drive/App.shift".into(),
+                    path: "Apps/User/Drive/App.vault".into(),
                     size: 4096,
                     digest: Some(DIGEST.into()),
                     verified: 1_700_000_100,
                 },
                 Entry {
-                    path: "Device/Messages.shift".into(),
+                    path: "Device/Messages.vault".into(),
                     size: 12,
                     digest: None,
                     verified: 0,
@@ -866,10 +866,10 @@ mod tests {
     fn a_marker_survives_only_while_it_describes_the_same_bytes() {
         let base = tmp("merge");
         touch(&base.join("Apps/User/Drive/Meta.txt"), b"Name=Drive\n");
-        touch(&base.join("Apps/User/Drive/App.shift"), b"archive");
+        touch(&base.join("Apps/User/Drive/App.vault"), b"archive");
         touch(
-            &base.join("Apps/User/Drive/App.shift.sha256"),
-            format!("{DIGEST}  App.shift\n").as_bytes(),
+            &base.join("Apps/User/Drive/App.vault.sha256"),
+            format!("{DIGEST}  App.vault\n").as_bytes(),
         );
         let mut first = build(&base);
         first.entries[0].verified = 1_700_000_000;
@@ -883,15 +883,15 @@ mod tests {
         // A rewrite replaces the sidecar too: same size, different digest, so
         // the marker describes nothing that is still there.
         touch(
-            &base.join("Apps/User/Drive/App.shift.sha256"),
-            format!("{}  App.shift\n", DIGEST.replace('a', "b")).as_bytes(),
+            &base.join("Apps/User/Drive/App.vault.sha256"),
+            format!("{}  App.vault\n", DIGEST.replace('a', "b")).as_bytes(),
         );
         let mut rewritten = build(&base);
         merge_verification(&first, &mut rewritten);
         assert_eq!(rewritten.entries[0].verified, 0);
 
         // Sidecar deleted: nothing records those bytes any more.
-        let _ = fs::remove_file(base.join("Apps/User/Drive/App.shift.sha256"));
+        let _ = fs::remove_file(base.join("Apps/User/Drive/App.vault.sha256"));
         let mut unrecorded = build(&base);
         merge_verification(&first, &mut unrecorded);
         assert_eq!(unrecorded.entries[0].verified, 0);
@@ -919,12 +919,12 @@ mod tests {
     #[test]
     fn a_read_back_digest_is_evidence_and_anything_else_is_not() {
         let base = tmp("skipevidence");
-        let file = base.join("Apps/User/Drive/App.shift");
+        let file = base.join("Apps/User/Drive/App.vault");
         touch(&base.join("Apps/User/Drive/Meta.txt"), b"Name=Drive\n");
         touch(&file, b"archive");
         touch(
-            &base.join("Apps/User/Drive/App.shift.sha256"),
-            format!("{DIGEST}  App.shift\n").as_bytes(),
+            &base.join("Apps/User/Drive/App.vault.sha256"),
+            format!("{DIGEST}  App.vault\n").as_bytes(),
         );
 
         // No index at all: nothing has been read back, so nothing is known.
@@ -967,12 +967,12 @@ mod tests {
     fn a_read_back_records_a_marker_and_never_invents_a_digest() {
         let base = tmp("markreadback");
         touch(&base.join("Apps/User/Drive/Meta.txt"), b"Name=Drive\n");
-        touch(&base.join("Apps/User/Drive/App.shift"), b"archive");
+        touch(&base.join("Apps/User/Drive/App.vault"), b"archive");
         touch(
-            &base.join("Apps/User/Drive/App.shift.sha256"),
-            format!("{DIGEST}  App.shift\n").as_bytes(),
+            &base.join("Apps/User/Drive/App.vault.sha256"),
+            format!("{DIGEST}  App.vault\n").as_bytes(),
         );
-        let path = "Apps/User/Drive/App.shift".to_string();
+        let path = "Apps/User/Drive/App.vault".to_string();
         let size = fs::metadata(base.join(&path)).unwrap().len();
         assert!(mark_read_back(&base, &[(path.clone(), size)], &[]));
         let after = read(&base).unwrap();
@@ -1016,13 +1016,13 @@ mod tests {
             generated: 1,
             entries: vec![
                 Entry {
-                    path: "Device/Messages.shift".into(),
+                    path: "Device/Messages.vault".into(),
                     size: 12,
                     digest: None,
                     verified: 0,
                 },
                 Entry {
-                    path: "Device/CallLogs.shift".into(),
+                    path: "Device/CallLogs.vault".into(),
                     size: 12,
                     digest: None,
                     verified: 0,
@@ -1043,7 +1043,7 @@ mod tests {
     #[test]
     fn an_index_that_names_what_cannot_be_named_is_refused() {
         // A path carrying the field separator would describe a different file.
-        let text = format!("{HEADER}\nGENERATED|1\nENTRY|Device/a|b.shift|12|\nEND|1\n");
+        let text = format!("{HEADER}\nGENERATED|1\nENTRY|Device/a|b.vault|12|\nEND|1\n");
         assert!(parse(&text).is_err());
         // A relative path is required: the vault moves.
         let text =
@@ -1051,7 +1051,7 @@ mod tests {
         assert!(parse(&text).is_err());
         let text = format!("{HEADER}\nGENERATED|1\nENTRY|Apps/../secrets|12|\nEND|1\n");
         assert!(parse(&text).is_err());
-        let text = format!("{HEADER}\nGENERATED|1\nENTRY|Device/Messages.shift|notasize|\nEND|1\n");
+        let text = format!("{HEADER}\nGENERATED|1\nENTRY|Device/Messages.vault|notasize|\nEND|1\n");
         assert!(parse(&text).is_err());
         assert!(parse("").is_err());
         assert!(parse("SOMETHING ELSE|1\nEND|0\n").is_err());
@@ -1074,8 +1074,8 @@ mod tests {
     fn the_check_reports_presence_not_content() {
         let base = tmp("check");
         touch(&base.join("Apps/User/Drive/Meta.txt"), b"Name=Drive\n");
-        touch(&base.join("Apps/User/Drive/App.shift"), b"archive");
-        touch(&base.join("Device/Messages.shift"), b"messages");
+        touch(&base.join("Apps/User/Drive/App.vault"), b"archive");
+        touch(&base.join("Device/Messages.vault"), b"messages");
         let manifest = build(&base);
         // Same sizes, rewritten bytes: a size check cannot see it, and must not
         // claim to have.
@@ -1090,13 +1090,13 @@ mod tests {
             assert_eq!(agreement(Some(entry.size), Some(now)), Agreement::Present);
         }
         // A grown archive is caught.
-        fs::write(base.join("Device/Messages.shift"), b"messages and more").unwrap();
-        let now = fs::metadata(base.join("Device/Messages.shift"))
+        fs::write(base.join("Device/Messages.vault"), b"messages and more").unwrap();
+        let now = fs::metadata(base.join("Device/Messages.vault"))
             .unwrap()
             .len();
         assert_eq!(agreement(Some(8), Some(now)), Agreement::Changed);
         // A deleted one is caught.
-        fs::remove_file(base.join("Apps/User/Drive/App.shift")).unwrap();
+        fs::remove_file(base.join("Apps/User/Drive/App.vault")).unwrap();
         assert_eq!(agreement(Some(7), None), Agreement::Missing);
         let _ = fs::remove_dir_all(&base);
     }
@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn writing_an_index_never_truncates_the_previous_one() {
         let base = tmp("atomic");
-        touch(&base.join("Device/Messages.shift"), b"messages");
+        touch(&base.join("Device/Messages.vault"), b"messages");
         let good = build(&base);
         assert!(write(&base, &good));
 

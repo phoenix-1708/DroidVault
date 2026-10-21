@@ -39,6 +39,11 @@ import java.io.File
  * NOTE: the old-name string constants below are REQUIRED — this object is
  * the only place that must know the pre-rebrand layout in order to move
  * users off it.
+ *
+ * The same goes for the old ARCHIVE extension, which is named in one place
+ * per side: `models/VaultArchive.kt` (the vocabulary that resolves it) and
+ * `VaultExtensionMigration.kt` (the migration that renames what is on disk).
+ * Nothing else may name it — see the guard in `ConventionGuardTest`.
  */
 object LegacyMigration {
 

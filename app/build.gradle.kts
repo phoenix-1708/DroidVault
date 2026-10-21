@@ -967,8 +967,61 @@ android {
         //    else. Action labels, live progress, badges and the selected tab
         //    keep it, because there the colour is information.
         //  - Nothing else changed.
-        versionCode = 500002
-        versionName = "3.0.2"
+        // 3.0.3 (500003) — the restoration pass. Six reports from the field, all
+        // reproducible on the reference device, all fixed on the debug build and
+        // verified there before the release was cut.
+        //  - The restoration page now appears whenever a run is live. It used to
+        //    show itself only to the screen that started the run, so rotating or
+        //    reopening the app during a restore left it invisible until the run
+        //    ended.
+        //  - A restored app goes back into the launcher as soon as its own data
+        //    is in place. It used to stay hidden until the whole run finished, so
+        //    the app drawer filled in all at once at the end.
+        //  - A device item that could not be restored says so. The Wi-Fi,
+        //    wallpaper and Bluetooth restores threw the engine's answer away, so
+        //    a restore that did nothing was recorded as a success.
+        //  - A message that is already on the phone is no longer written again.
+        //    A message whose archived text ended in a line break compared
+        //    differently to the copy on the phone, so every restore added
+        //    another copy of it and then reported it as one that could not be
+        //    written.
+        //  - The shade card says what the run is doing and always ends with a
+        //    result. It used to read "Restore started" for the whole run and
+        //    could not be swiped away.
+        //  - The time-left figure no longer grows while the run works.
+        //  - The dry-run preview's notes, headings and component lists use the
+        //    reading colour instead of the link colour.
+        // 4.0.0 (600000) — the colour pass, the restoration pass, and a
+        // configuration that can leave an app out. Three releases' worth of
+        // work, because the field reports that drove them all arrived together.
+        //
+        //  - The app is no longer blue. The accent is a muted plum, the
+        //    neutrals are warm greys instead of blue-tinted, and every filled
+        //    action is a tonal plate rather than a bright slab.
+        //  - The colour is the user's to choose. Settings -> Theme -> Accent
+        //    colour opens the whole Material palette - nineteen families, every
+        //    shade, a hex field - plus three contrast steps, rendered through
+        //    Google's own tonal-palette engine so every one of them is legible.
+        //  - The button that deletes now looks like the button that deletes:
+        //    every destructive confirmation wears the error role.
+        //  - A dry run shows what the configuration WILL do. It used to end in
+        //    hundreds of rows of the apps a configuration does not cover; it now
+        //    ends with one sentence and a count, and a device-data
+        //    configuration's preview shows its device items with a live Run
+        //    button.
+        //  - A configuration can leave out an individual app, and the apps it
+        //    leaves out are named on the card, with a Reset beside the count.
+        //  - The folder picker opens at the vault's own folder instead of the
+        //    storage root.
+        //  - The restoration page appears whenever a restore is running, a
+        //    restored app goes back into the launcher as soon as its own data
+        //    is in place, a device item that could not be restored says so,
+        //    and a message already on the phone is no longer written again.
+        //  - A restore checks only the backups it is about to restore, and the
+        //    check runs on four cores. The same eight-app restore went from
+        //    85 seconds of silent hashing to 1.6.
+        versionCode = 600000
+        versionName = "4.0.0"
     }
 
     signingConfigs {
@@ -1214,6 +1267,10 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.androidx.compose.material3)
+    // The tonal-palette engine behind the user's chosen accent. See
+    // ui/theme/AccentSeed.kt for why the app cannot generate a theme from an
+    // arbitrary hue on its own.
+    implementation(libs.material.color.utilities)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)

@@ -55,6 +55,89 @@ object SeedPolicy {
         if (availableInBackup.isEmpty()) selected else selected intersect availableInBackup
 }
 
+/**
+ * Whole-run ETA from the measured byte counter, honest about stalls.
+ *
+ * The estimate used to be `elapsed * remaining / done` — an average over the
+ * whole run. Nothing in that is wrong arithmetic, and it still climbed: a part
+ * that legitimately moves no bytes for a while (a 13 GB media copy, a quiesce
+ * before a tree swap) holds `done` still while `elapsed` keeps rising, so the
+ * average rate falls and the "time left" figure GROWS. Field report: "~51s
+ * left" became "~1m 9s left" and read as the run going backwards (§2.31).
+ *
+ * Two rules replace the average:
+ *
+ *  - the rate comes from a RECENT window, so a stalled part stops
+ *    manufacturing an ever-larger number; and
+ *  - the rendered figure is monotone non-increasing for the whole run, because
+ *    the error worth preventing is making a nearly-finished run look slow.
+ *
+ * The rate is measured on the bytes **written**, not on the run's progress
+ * counter. The counter counts a part the engine skipped — nothing to install,
+ * nothing to copy — as done in full, so a counter taken over an incremental
+ * run jumps over bytes that were never written, and a rate built on it says
+ * the run is nearly over while it is not. Measured on the reference device: a
+ * restore of eight apps reported "626.6 MB of 1.4 GB" four seconds in, and the
+ * bytes still to write had barely moved. So the caller passes two numbers: the
+ * bytes written so far (the rate) and the bytes still to write (the
+ * numerator).
+ *
+ * Every case where the number cannot be trusted returns `null` — no sample yet,
+ * window too short, no byte movement in the window, or a value outside a sane
+ * bound. Absence is rendered as absence, never as "0" and never as a guess.
+ */
+class EtaEstimator(
+    private val windowMs: Long = 20_000L,
+    private val minSpanMs: Long = 8_000L,
+    private val minEtaSec: Long = 5L,
+    private val maxEtaSec: Long = 6L * 3600L,
+) {
+    private data class Sample(val atMs: Long, val writtenKb: Long)
+
+    private val samples = ArrayDeque<Sample>()
+    private var lastSampleAtMs = Long.MIN_VALUE
+    private var lastResult: Long? = null
+    private var lastShownSec = Long.MAX_VALUE
+
+    /**
+     * Seconds remaining, or null when no figure can be trusted.
+     *
+     * @param writtenKb bytes actually written so far — the rate is taken from
+     *   this, and the parts the engine skipped must not be in it.
+     * @param remainingKb bytes still to write — what the estimate is about.
+     */
+    fun update(writtenKb: Long, remainingKb: Long, nowMs: Long): Long? {
+        // Composition can evaluate the same instant more than once; one sample
+        // per instant, and the answer of that instant is reused.
+        if (nowMs == lastSampleAtMs) return lastResult
+        lastSampleAtMs = nowMs
+        lastResult = compute(writtenKb, remainingKb, nowMs)
+        return lastResult
+    }
+
+    private fun compute(writtenKb: Long, remainingKb: Long, nowMs: Long): Long? {
+        // Nothing left to write, or nothing written yet: there is no estimate
+        // to give.
+        if (remainingKb <= 0 || writtenKb <= 0) return null
+        samples.addLast(Sample(nowMs, writtenKb))
+        while (samples.size > 1 && nowMs - samples.first().atMs > windowMs) {
+            samples.removeFirst()
+        }
+        val first = samples.first()
+        val span = nowMs - first.atMs
+        if (span < minSpanMs) return null
+        val gainedKb = writtenKb - first.writtenKb
+        // A stalled window is exactly what used to inflate the figure: say
+        // nothing rather than something bigger.
+        if (gainedKb <= 0) return null
+        val etaSec = remainingKb * span / gainedKb / 1000L
+        if (etaSec !in minEtaSec..maxEtaSec) return null
+        val shown = minOf(etaSec, lastShownSec)
+        lastShownSec = shown
+        return shown
+    }
+}
+
 @Immutable
 data class PartProgress(
     val key: String,
@@ -114,6 +197,30 @@ data class AppProgress(
                 PartState.PENDING -> 0L
             }
         }
+
+    /**
+     * Bytes this app counted as done that were **not written**.
+     *
+     * A SKIPPED part is one the engine had nothing to do for — the app is
+     * already at that version, or the part holds nothing. It is "done" in the
+     * sense that the run will not write it, and the run's progress counts it
+     * in full. So `doneKb` is a count of parts, not a measure of traffic.
+     *
+     * That distinction decides what a rate may be measured from. Measured on the
+     * reference device: a restore of eight apps reported "626.6 MB of 1.4 GB"
+     * four seconds in, while the bytes still to write were barely moving —
+     * the counter had jumped over the parts the engine skipped. A rate taken
+     * from that counter is inflated by bytes that were never written, and an
+     * estimate built on it says the run is nearly over while it is not.
+     */
+    val skippedKb: Long
+        get() = parts.sumOf {
+            if (it.state == PartState.SKIPPED) it.expectedKb else 0L
+        }
+
+    /** Bytes this app actually wrote — [doneKb] without the skipped parts. */
+    val writtenKb: Long
+        get() = doneKb - skippedKb
 
     /**
      * Bytes this app is expected to write in total.
@@ -176,7 +283,7 @@ data class AppSeed(
     val iconPath: String?,
     val parts: List<String> = emptyList(),
     val sizeKb: Long = 0,
-    /** Backup runs only: part key -> candidate .shift files to poll for byte progress. */
+    /** Backup runs only: part key -> candidate .vault files to poll for byte progress. */
     val watchFiles: Map<String, List<String>> = emptyMap(),
     /**
      * Restore runs only: part key -> extraction TARGET directories whose

@@ -44,16 +44,19 @@
 //! profile as defaults. A restore that placed the data perfectly and labelled it
 //! too late reads to the user as a successful restore that lost everything.
 //!
-//! Extracted files are also root-owned, and the app needs its own uid. Today
-//! both fixes happen in the end-of-run queue pass (`restore_ownership`), which
-//! means a run killed at app 50 leaves apps 1-49 owned by root and mislabeled —
-//! a restore that reports nothing and leaves apps unable to open their own data.
+//! Extracted files are also root-owned, and the app needs its own uid. Both
+//! fixes, and the `cmd package enable` that puts a reinstalled app back into the
+//! launcher, now happen PER APP the moment that app's last tree is in place
+//! ([`finish_restored_app`]). They used to run in one end-of-run queue pass, and
+//! that had two costs, both reported from the field: every reinstalled app stayed
+//! disabled until the whole run had finished, so the app drawer stayed empty and
+//! then filled in all at once; and the pass was also the one thing a killed run
+//! skipped.
 //!
-//! So the journal remembers the WORK, not just the files: an entry written
-//! before the first rename is cleared only by the pass that fixes ownership and
-//! labels. Killed anywhere in between, the next restore run finds the entry and
-//! finishes the job (`Heal::CompletePending`) instead of leaving the tree
-//! unusable.
+//! The journal is still what covers the kill: an entry written before the
+//! first rename is cleared only by the pass that finishes the app. Killed
+//! anywhere in between, the next restore run finds the entry and finishes the
+//! job (`Heal::CompletePending`) instead of leaving the tree unusable.
 //!
 //! ## Cost
 //!
@@ -313,9 +316,10 @@ fn media_gids() -> &'static Vec<(String, String)> {
 
 /// Ownership and labels for a tree that was just placed.
 ///
-/// One implementation, used by the end-of-run queue pass AND by the journal's
-/// recovery pass. Two copies of a rule like this drift, and the copy that drifts
-/// silently is the one that only runs after a crash.
+/// One implementation, shared by [`finish_restored_app`] (every restore, per
+/// app) and by the journal's recovery pass. Two copies of a rule like this
+/// drift, and the copy that drifts silently is the one that only runs after a
+/// crash.
 ///
 /// Restored files arrive root-owned and (through a staged placement) labeled
 /// `system_data_file`, so both fixes are required before the app can open its
@@ -339,6 +343,50 @@ pub fn fix_ownership_and_labels(package: &str, uid: &str) {
             ["-hR", &format!("{uid}:{gid}"), &format!("{root}/{package}")],
         );
     }
+}
+
+/// Everything a just-placed tree still needs before its app may run.
+///
+/// Three things are wrong with a restored tree. The files arrived root-owned, a
+/// staged placement left them labelled `system_data_file` (the label goes FIRST
+/// — an app that opens a database it cannot read marks every row `hidden`, and
+/// fixing the label afterwards does not bring them back), and a freshly
+/// installed app was DISABLED for the length of its unpack. A package also
+/// carries datatransport/measurement leftovers captured from the old install
+/// that belong to no part of this one.
+///
+/// `cmd package enable` is the line that puts a reinstalled app back into the
+/// launcher's app drawer, and it is why this runs per app rather than at the end
+/// of the run: the app's own disable removed it from `pm list packages -e`, so
+/// until this line runs the app is installed, has its data, and is invisible.
+/// Holding it to the end of the run kept every reinstalled app of a ROM-flash
+/// restore out of the drawer until the last one had finished, and the end-of-run
+/// pass was also the one thing a run killed at app 50 skipped.
+///
+/// One implementation, two callers: the app's own completion in `engine.rs`, and
+/// the journal's recovery pass (`Heal::CompletePending`) after a kill. The
+/// journal entry itself is cleared by the caller, which owns the journal write.
+pub fn finish_restored_app(package: &str, uid: &str) {
+    fix_ownership_and_labels(package, uid);
+    if !command::valid_package(package) {
+        return;
+    }
+    let _ = command::status(
+        "rm",
+        [
+            "-f",
+            &format!("/data/data/{package}/databases/com.google.android.datatransport.events"),
+            &format!(
+                "/data/data/{package}/databases/com.google.android.datatransport.events-journal"
+            ),
+            &format!("/data/data/{package}/no_backup/com.google.android.gms.appid-no-backup"),
+            &format!("/data/data/{package}/shared_prefs/com.google.android.gms.appid.xml"),
+            &format!(
+                "/data/data/{package}/shared_prefs/com.google.android.gms.measurement.prefs.xml"
+            ),
+        ],
+    );
+    let _ = command::status("cmd", ["package", "enable", package]);
 }
 
 /// Label a just-placed tree so the app can read it.
@@ -489,9 +537,14 @@ pub fn heal_journal() -> usize {
                 if aside {
                     let _ = fs::remove_dir_all(&entry.aside);
                 }
-                fix_ownership_and_labels(&entry.package, &entry.uid);
+                // The SAME pass a surviving run performs, enable included: a
+                // killed run left the app disabled as well as root-owned, and a
+                // repaired tree the launcher cannot see is not a repaired
+                // restore. The journal entry is dropped from `outstanding`
+                // below, which is the caller's half of clearing it.
+                finish_restored_app(&entry.package, &entry.uid);
                 protocol::raw(&format!(
-                    "NOTE:RESTORE|completed|{}|ownership and labels finished after an interrupted run",
+                    "NOTE:RESTORE|completed|{}|ownership, labels and enabled state finished after an interrupted run",
                     entry.package
                 ));
                 repaired += 1;

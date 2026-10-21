@@ -40,20 +40,38 @@ enum class DeviceDataItem(val label: String) {
     BLUETOOTH("Bluetooth"),
     FOLDERS("Folders");
 
-    /** The archive file the engine verifies for this item, e.g. "Messages.shift". */
+    /**
+     * The archive file this item is stored in, e.g. "Messages.vault".
+     *
+     * The name an archive is WRITTEN as. An archive written before the
+     * extension moved is still found: see [VaultArchive.existing].
+     */
     val archiveFile: String
+        get() = VaultArchive.name(archiveBase)
+
+    /**
+     * The archive's base name, without the extension — "Messages",
+     * "CallLogs", "Wi-Fi".
+     *
+     * The base is what the two extensions hang off, so it is the thing a
+     * reader resolves: one table of bases, two possible names each.
+     */
+    val archiveBase: String
         get() = when (this) {
-            MESSAGES -> "Messages.shift"
-            CALLS -> "CallLogs.shift"
-            CONTACTS -> "Contacts.shift"
-            WIFI -> "Wi-Fi.shift"
-            WALLPAPER -> "Wallpaper.shift"
-            BLUETOOTH -> "Bluetooth.shift"
-            FOLDERS -> "Folders.shift"
+            MESSAGES -> "Messages"
+            CALLS -> "CallLogs"
+            CONTACTS -> "Contacts"
+            WIFI -> "Wi-Fi"
+            WALLPAPER -> "Wallpaper"
+            BLUETOOTH -> "Bluetooth"
+            FOLDERS -> "Folders"
         }
 
     companion object {
         fun fromName(name: String): DeviceDataItem? = entries.find { it.name == name }
+
+        /** The item whose user-facing label is this one ("Calls" -> CALLS). */
+        fun fromLabel(label: String): DeviceDataItem? = entries.find { it.label == label }
     }
 }
 
@@ -173,11 +191,46 @@ data class BackupConfig(
      * the archive. Must be absolute and shell-safe (validated).
      */
     val folderPaths: List<String> = emptyList(),
+    /**
+     * Apps this configuration will not touch, by package name.
+     *
+     * The per-app form of what a SKIP rule does to a whole label: the user
+     * keeps the label and drops the individual apps they do not want. A
+     * PACKAGE NAME and not a label id, because a reinstall re-issues label
+     * UUIDs — an exclusion recorded against a label would be orphaned by the
+     * next reinstall, and one recorded against a package survives it.
+     *
+     * Honoured by the planner, so it applies to manual and scheduled runs
+     * alike: the run always re-plans from the saved configuration.
+     */
+    val excludedPackages: Set<String> = emptySet(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
     /** Position among configs of the same operation; see [CONFIG_LIST_ORDER_DEFAULT]. */
     val listOrder: Long = CONFIG_LIST_ORDER_DEFAULT
-)
+) {
+    /**
+     * Whether this configuration covers **any app at all**.
+     *
+     * A configuration may be device-data-only: no app rules, and a fallback
+     * that skips whatever does not match. Such a configuration's plan contains
+     * one entry per app on the device, all of them skipped with "no matching
+     * rule" — which says nothing about the configuration, only that the
+     * configuration does not do apps.
+     *
+     * So the question is asked of the CONFIGURATION and not of the plan: a
+     * configuration that HAS app rules but whose label matches nothing today
+     * still covers apps (and its preview must still show the app part, or the
+     * user would be told it does nothing). A configuration whose only rule
+     * excludes a label, with a SKIP fallback, covers nothing — the exclusion
+     * is not a grant.
+     *
+     * The fallback decides the apps no rule matched, so `USE_DEFAULT` means
+     * every unmatched app is covered and the configuration does do apps.
+     */
+    val coversApps: Boolean
+        get() = rules.any { !it.exclude } || fallback == FallbackPolicy.USE_DEFAULT
+}
 
 /** Minimal app view the planner needs (mapped from AppInfo at the boundary). */
 @Immutable
@@ -212,7 +265,15 @@ data class PlannedApp(
     val unavailableReasons: Map<BackupComponent, String> = emptyMap(),
     val skipped: Boolean,
     val skipReason: String = "",
-    val error: ErrorCode = ErrorCode.NONE
+    val error: ErrorCode = ErrorCode.NONE,
+    /**
+     * The user excluded this app from the configuration by name.
+     *
+     * Distinct from every other skip: a SKIP rule excludes a whole LABEL, and
+     * a missing rule means the app was never in the plan. Only this one is the
+     * user's own decision, and only this one the preview offers to undo.
+     */
+    val excluded: Boolean = false
 )
 
 @Immutable
@@ -221,11 +282,37 @@ data class BackupPlan(
     val configName: String,
     val dryRun: Boolean,
     val entries: List<PlannedApp>,
+    /**
+     * The device data this configuration will process.
+     *
+     * Carried in the PLAN so that the dry run can show it: a device-data
+     * configuration has no app entries at all, and a preview that could not
+     * see the device part would describe a run it knows nothing about.
+     */
+    val deviceData: Set<DeviceDataItem> = emptySet(),
+    /** The folders packed alongside the device data (FOLDERS only). */
+    val folderPaths: List<String> = emptyList(),
+    /**
+     * Whether the configuration covers apps at all — see
+     * [BackupConfig.coversApps]. Copied here because the plan is what the
+     * preview renders, and a preview must not have to look the configuration
+     * up to know what shape it has.
+     */
+    val coversApps: Boolean = true,
     val createdAt: Long = System.currentTimeMillis()
 ) {
     val processable: List<PlannedApp> get() = entries.filter { !it.skipped && it.granted.isNotEmpty() }
     val skipped: List<PlannedApp> get() = entries.filter { it.skipped }
     val withUnavailable: List<PlannedApp> get() = entries.filter { it.unavailable.isNotEmpty() }
+
+    /**
+     * The apps the user excluded from this configuration by name.
+     *
+     * A group of their own, because they are the only skips the user can undo
+     * from the preview — and because "you excluded this" and "no rule matched
+     * this" are different sentences with different fixes.
+     */
+    val excluded: List<PlannedApp> get() = entries.filter { it.excluded }
 }
 
 @Immutable

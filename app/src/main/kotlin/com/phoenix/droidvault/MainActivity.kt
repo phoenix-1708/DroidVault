@@ -32,6 +32,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
             val dynamicColor by viewModel.dynamicColor.collectAsStateWithLifecycle()
+            val accent by viewModel.accent.collectAsStateWithLifecycle()
             val systemDark = isSystemInDarkTheme()
 
             val isDark = when (themeMode) {
@@ -49,7 +50,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            DroidVaultTheme(themeMode = themeMode, dynamicColor = dynamicColor) {
+            DroidVaultTheme(themeMode = themeMode, dynamicColor = dynamicColor, accent = accent) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     MainScreen(viewModel = viewModel)
                 }

@@ -91,7 +91,18 @@ fun CircularCheckbox(
             .clip(CircleShape)
             .background(containerColor)
             .border(2.dp, borderColor, CircleShape)
-            .clickable(enabled = onCheckedChange != null) { onCheckedChange?.invoke() },
+            // NO pointer input at all when there is no handler. A disabled
+            // `clickable` still installs its pointer input, and it CONSUMES the
+            // event: a checkbox drawn inside a bigger clickable target then
+            // swallows the tap and the target never fires. (Found on the
+            // Automation dry run, where the per-app switch did nothing at all.)
+            .then(
+                if (onCheckedChange != null) {
+                    Modifier.clickable { onCheckedChange.invoke() }
+                } else {
+                    Modifier
+                }
+            ),
         contentAlignment = Alignment.Center
     ) {
         if (checked) {

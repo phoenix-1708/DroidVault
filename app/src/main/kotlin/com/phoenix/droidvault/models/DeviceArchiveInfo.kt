@@ -30,7 +30,15 @@ data class DeviceArchiveInfo(
     /** The archive is in `Device/`. Not the same claim as "reads back". */
     val present: Boolean,
     val sizeBytes: Long = 0L,
-    val modifiedAt: Long = 0L
+    val modifiedAt: Long = 0L,
+    /**
+     * The file the archive is actually under, e.g. "Messages.vault".
+     *
+     * The name on disk, not the name the app writes: an archive written
+     * before the extension moved is still this item's archive, and the trash
+     * has to move the file that is THERE.
+     */
+    val fileName: String = item.archiveFile
 ) {
     /** "7.5 KB" — or empty when there is nothing there to measure. */
     val sizeLabel: String
@@ -230,8 +238,16 @@ object DeviceArchiveReader {
 
     /** `stat` is silent for a missing file, so its absence IS the absence. */
     fun parse(output: List<String>, vaultPath: String): List<DeviceArchiveInfo> {
-        val known = DeviceDataItem.entries.associateBy { it.archiveFile }
-        val sizes = HashMap<String, Pair<Long, Long>>()
+        // Both names are the same archive: an item's archive is found under
+        // the new extension or the one before it, and the item it belongs to
+        // is the same either way.
+        val known = HashMap<String, DeviceDataItem>()
+        for (item in DeviceDataItem.entries) {
+            for (name in VaultArchive.names(item.archiveBase)) {
+                known[name] = item
+            }
+        }
+        val sizes = HashMap<DeviceDataItem, Triple<Long, Long, String>>()
         for (line in output) {
             val trimmed = line.trim()
             if (trimmed.isEmpty()) continue
@@ -240,10 +256,15 @@ object DeviceArchiveReader {
             val size = parts[parts.size - 2].toLongOrNull() ?: continue
             val mtime = parts[parts.size - 1].toLongOrNull() ?: continue
             val name = parts.dropLast(2).joinToString(" ").substringAfterLast('/')
-            if (name in known) sizes[name] = size to mtime
+            val item = known[name] ?: continue
+            // The NEW name is stat'ed first, so the FIRST answer wins: when
+            // both spellings are on disk — a trash restore can put an old-named
+            // archive back — the live one is the new-named file.
+            if (sizes.containsKey(item)) continue
+            sizes[item] = Triple(size, mtime, name)
         }
         return DeviceDataItem.entries.map { item ->
-            val stat = sizes[item.archiveFile]
+            val stat = sizes[item]
             if (stat == null || stat.first <= 0L) {
                 DeviceArchiveInfo(item, present = false)
             } else {
@@ -251,7 +272,8 @@ object DeviceArchiveReader {
                     item = item,
                     present = true,
                     sizeBytes = stat.first,
-                    modifiedAt = stat.second * 1000L
+                    modifiedAt = stat.second * 1000L,
+                    fileName = stat.third
                 )
             }
         }

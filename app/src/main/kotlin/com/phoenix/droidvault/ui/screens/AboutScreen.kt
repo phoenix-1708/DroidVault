@@ -891,7 +891,8 @@ private fun rememberReducedMotion(): Boolean {
 private val APP_PART_FACTS = listOf(
     Fact(
         "App package",
-        "The installed APK and its split APKs, stored as App.shift."
+        "The installed APK and its split APKs, stored as " +
+            com.phoenix.droidvault.models.VaultArchive.name("App") + "."
     ),
     Fact(
         "App data",

@@ -151,6 +151,7 @@ object AutomationCodec {
         .put("destinationId", c.destinationId)
         .put("deviceData", JSONArray(c.deviceData.map { it.name }))
         .put("folderPaths", JSONArray(c.folderPaths))
+        .put("excludedPackages", JSONArray(c.excludedPackages.toList()))
         .put("createdAt", c.createdAt).put("updatedAt", c.updatedAt)
         .put("listOrder", c.listOrder)
 
@@ -191,6 +192,14 @@ object AutomationCodec {
                     if (BackupConfigFolders.isValidPath(p)) p else null
                 }.distinct()
             } ?: emptyList(),
+            // A configuration written before this field existed has none, and
+            // that is the right reading: nothing was excluded.
+            excludedPackages = o.optJSONArray("excludedPackages")?.let { arr ->
+                (0 until arr.length())
+                    .map { arr.optString(it).trim() }
+                    .filter { it.isNotEmpty() }
+                    .toSet()
+            } ?: emptySet(),
             createdAt = o.optLong("createdAt", System.currentTimeMillis()),
             updatedAt = o.optLong("updatedAt", System.currentTimeMillis()),
             listOrder = o.optLong("listOrder", CONFIG_LIST_ORDER_DEFAULT)

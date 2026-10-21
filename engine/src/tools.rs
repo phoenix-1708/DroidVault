@@ -152,10 +152,12 @@ fn reinstall_from_vault(package: &str, vault: &str) -> Result<(), String> {
     let apps = vault_apps(vault).ok_or_else(|| "Invalid backup folder".to_string())?;
     let dir = find_app_dir(&apps, package)
         .ok_or_else(|| "No backup of this app in the vault".to_string())?;
-    let archive = dir.join("App.shift");
-    if !archive.is_file() {
-        return Err("The backup holds no app package to reinstall".into());
-    }
+    // Resolved, not assumed: an archive written before the extension moved is
+    // the same archive under the other name.
+    let archive = match crate::vault::existing_archive(&dir, "App") {
+        Some(path) => path,
+        None => return Err("The backup holds no app package to reinstall".into()),
+    };
 
     // Staged outside the vault: this is scratch space for one install, and the
     // vault holds the only good copy of these bytes.

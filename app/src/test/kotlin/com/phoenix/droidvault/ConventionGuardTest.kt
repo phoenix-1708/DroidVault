@@ -1379,6 +1379,322 @@ class ConventionGuardTest {
         return null
     }
 
+    /**
+     * The text of the block that starts at the first `{` after [marker].
+     *
+     * Braces are matched, so the answer is the BLOCK and not a window. Two
+     * ways of approximating it have already cost this project a guard that
+     * passed while enforcing nothing: a fixed 700-character window reached
+     * into the NEXT function (§2.84), and a `[^}]*` span stopped at the first
+     * closing brace of an inner `if` and so missed the very call it was
+     * written to find. Match the braces.
+     */
+    private fun blockAfter(source: String, marker: String): String? {
+        val at = source.indexOf(marker)
+        if (at < 0) return null
+        val open = source.indexOf('{', at + marker.length)
+        if (open < 0) return null
+        var depth = 0
+        for (i in open until source.length) {
+            when (source[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return source.substring(open, i + 1)
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * A restored app must be handed back to the launcher AS IT FINISHES.
+     *
+     * Found from the field: after a ROM-flash restore, the app drawer stayed
+     * empty and every reinstalled app appeared at once, when the last one was
+     * done. The cause was the engine's shape: `cmd package disable` after a
+     * fresh install removed the package from `pm list packages -e`, and the
+     * matching `cmd package enable` ran in ONE pass at the end of the whole
+     * run. So a 110-app restore kept 110 apps invisible for the whole run.
+     *
+     * The rule: the app is enabled, labelled and owned the moment ITS tree is
+     * in place — not at the end of the run, and not by a pass that a killed
+     * run skips. Checked inside the span of `restore_app`, so an `enable`
+     * somewhere else in the engine cannot stand in for it.
+     */
+    @Test
+    fun `a restored app is enabled when it finishes, not when the run finishes`() {
+        val src = code(read(File(repoRoot, "engine/src/engine.rs")))
+        val fn = rustSpanLike(src, "restore_app")
+        assertNotNull("could not find fn restore_app — re-point this guard", fn)
+        val body = fn!!
+        // Both halves, and NOT one standing in for the other: `clear_pending`
+        // clears the journal entry, `finish_restored_app` fixes ownership,
+        // labels AND enables. A guard that accepted either would have passed
+        // against a tree that was never enabled — which is the defect.
+        assertTrue(
+            "restore_app must finish the app it just restored — the tree is " +
+                "usable and the app belongs back in the launcher. An enable that " +
+                "waits for the end of the run keeps every reinstalled app out of " +
+                "the app drawer for the whole run",
+            Regex("""\bfinish_restored_app\s*\(""").containsMatchIn(body)
+        )
+        assertTrue(
+            "restore_app must clear the package's journal entry once the tree is " +
+                "usable, so a killed run does not leave a stale repair pending",
+            Regex("""\bclear_pending\s*\(""").containsMatchIn(body)
+        )
+        // The end-of-run pass is what held the enable back. It must be gone:
+        // a queue file that accumulates one line per app and is read at the
+        // end is the shape of the defect.
+        assertFalse(
+            "the end-of-run queue pass is gone — it is what kept every " +
+                "reinstalled app disabled until the last app finished",
+            Regex("""restore_queue""").containsMatchIn(src) ||
+                Regex("""fn\s+restore_ownership\b""").containsMatchIn(src)
+        )
+        // And the pass that DOES the enabling must actually enable.
+        val restoreSrc = code(read(File(repoRoot, "engine/src/restore.rs")))
+        val finish = rustSpanLike(restoreSrc, "finish_restored_app")
+        assertNotNull("could not find fn finish_restored_app — re-point this guard", finish)
+        assertTrue(
+            "finish_restored_app must run `cmd package enable`, or the app stays " +
+                "invisible to the launcher no matter when it is called",
+            Regex(""""package"\s*,\s*"enable"""").containsMatchIn(finish!!)
+        )
+    }
+
+    /**
+     * A device item that could not be restored must say so.
+     *
+     * Found from the field: a device-data restore reported "2 ok, 1 failed" for
+     * the wrong reasons, and — worse — several items reported SUCCESS for work
+     * that never happened. The Wi-Fi, Wallpaper and Bluetooth apply steps ran
+     * the engine and threw its exit code away; a command that exited 0 after
+     * adding no network at all was recorded as a restored item. The call log
+     * caught its exception into a progress line no verdict ever read, and the
+     * contacts import swallowed it into a `printStackTrace()`.
+     *
+     * The rule: the engine's own answer decides. The apply steps go through
+     * one helper that reads the exit code, and the two provider writes report
+     * their failures through the same per-item signal both tabs read.
+     */
+    @Test
+    fun `a device item's verdict comes from what actually landed`() {
+        val src = code(read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/utils/DeviceManager.kt")))
+        // The apply steps must go through the one helper. A bare `.exec()` on
+        // a `--restore-*` command throws the verdict away.
+        val bare = Regex("""--restore-(wifi|wallpaper|bt)""").findAll(src).count()
+        val helperCalls = Regex("""(?<!fun )applyEngineStep\s*\(""").findAll(src).count()
+        assertEquals(
+            "every device-restore engine command must go through applyEngineStep, " +
+                "which reads its exit code: a command that exits 0 after doing " +
+                "nothing is a success the app must not report",
+            bare,
+            helperCalls
+        )
+        assertTrue(
+            "the three device restore commands (Wi-Fi, Wallpaper, Bluetooth) must " +
+                "be covered by the helper",
+            bare >= 3
+        )
+        assertNotNull(
+            "could not find applyEngineStep — re-point this guard",
+            Regex("""private fun applyEngineStep""").find(src)
+        )
+        // The provider writes must report their failures, not swallow them.
+        assertFalse(
+            "the contacts import must not swallow its exception — a provider " +
+                "that refuses a batch throws, and that is a failed restore, not " +
+                "a detail. Both tabs read the per-item failure signal",
+            Regex("""e\.printStackTrace\(\)""").containsMatchIn(src)
+        )
+        assertTrue(
+            "the call-log restore must report what it could not write through " +
+                "the per-item failure signal both tabs read",
+            Regex("""onFailure\(""").containsMatchIn(src)
+        )
+    }
+
+    /**
+     * The Processing page's visibility is DERIVED from the run, not remembered
+     * by the composition that happens to be on screen.
+     *
+     * Found from the field: the "Apps Restoration" page did not appear at all
+     * for a user who arrived while the run was live. The overlay decided to
+     * show itself by OBSERVING the Idle -> Running step and keeping that in a
+     * local `remember`; anyone who entered the composition later — a rotation,
+     * or simply reopening the app from the launcher — entered at phase "R",
+     * saw no transition, and the page stayed invisible for the rest of the run.
+     * The run's own status line sat on the screen that started it, and the
+     * notification was the only way back in.
+     *
+     * The rule: the only thing remembered is the user's own "leave this page",
+     * and the visibility is computed from the run state plus that.
+     */
+    @Test
+    fun `the Processing page is derived from the run, not from a remembered transition`() {
+        val src = code(
+            read(
+                File(
+                    repoRoot,
+                    "app/src/main/kotlin/com/phoenix/droidvault/ui/screens/MainScreen.kt"
+                )
+            )
+        )
+        val body = rustSpanLike(src, "LiveProcessingOverlay")
+        assertNotNull("could not find LiveProcessingOverlay — re-point this guard", body)
+        val span = body!!
+        assertFalse(
+            "the Processing page's visibility must not be a remembered boolean: " +
+                "a local `remember` that had to observe the Idle -> Running step " +
+                "made the page invisible to anyone who arrived mid-run",
+            Regex("""remember\s*\{\s*mutableStateOf\s*\(\s*false\s*\)""").containsMatchIn(span)
+        )
+        assertFalse(
+            "the overlay must not compare the current phase against a remembered " +
+                "previous phase — that comparison IS the transition detector that " +
+                "failed, and a run that started elsewhere never fires it",
+            Regex("""lastPhase""").containsMatchIn(span)
+        )
+        assertTrue(
+            "the overlay must consult the remembered dismissal, which is the one " +
+                "decision that genuinely has to outlive a composition",
+            span.contains("hiddenRunId")
+        )
+    }
+
+    /**
+     * A run that starts a shade card must always end it.
+     *
+     * Found from the field: the shade showed "Restore started" for a run that
+     * was over, and an ongoing card cannot be swiped away. The terminal post
+     * lived on the success branch, so any other ending — a throw the runner
+     * did not catch, a cancellation that unwound past it — left the card
+     * running forever. The user read that as an infinite notification.
+     *
+     * The rule: ONE terminal path, in a `finally`, so every exit posts a
+     * verdict. The message says which ending it was.
+     */
+    @Test
+    fun `a run that starts a notification card always ends it`() {
+        val src = code(read(File(repoRoot, "app/src/main/kotlin/com/phoenix/droidvault/AutomationViewModel.kt")))
+        val body = rustSpanLike(src, "doRunConfig")
+        assertNotNull("could not find doRunConfig — re-point this guard", body)
+        val span = body!!
+        assertTrue(
+            "doRunConfig must post its terminal notification from a finally, so " +
+                "every exit replaces the ongoing card: a card that outlives its " +
+                "run cannot be swiped away and reads as an infinite notification",
+            Regex("""finally\s*\{""").containsMatchIn(span)
+        )
+        // The block itself, matched by its braces: a `[^}]*` span stops at the
+        // closing brace of the inner `if` and never reaches the call.
+        val finallyBlock = blockAfter(span, "finally")
+        assertNotNull("could not find doRunConfig's finally block — re-point this guard", finallyBlock)
+        assertTrue(
+            "the finally must post the TERMINAL card (done = true); a progress " +
+                "card posted from the finally would leave the shade running",
+            Regex("""notifyAutomation\s*\([^)]*true""").containsMatchIn(finallyBlock!!)
+        )
+    }
+
+    /**
+     * The text of the call `name(...)`, with the parentheses matched.
+     *
+     * A window (`[^)]*`) stops at the first closing parenthesis, which here is
+     * inside the call's own arguments — `resolveSavedPath(context)` — and a
+     * fixed character window can reach into the NEXT call and vouch for it
+     * (§4.33's sixth). Matching the parentheses is the only way to get the span
+     * of a call.
+     */
+    private fun callSpan(source: String, name: String): String? {
+        val at = source.indexOf("$name(")
+        if (at < 0) return null
+        val open = at + name.length
+        var depth = 0
+        for (i in open until source.length) {
+            when (source[i]) {
+                '(' -> depth++
+                ')' -> {
+                    depth--
+                    if (depth == 0) return source.substring(open, i + 1)
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * The pre-restore gate checks the PLAN, and it is on the run screen.
+     *
+     * Measured on the reference device: a restore of eight apps (1.4 GB) spent
+     * **85 seconds** in the gate before the restore began, because the gate
+     * hashed every archive in the vault (110 apps, 15.8 GB) to vouch for eight
+     * of them — and the page did not exist yet, so the wait was a config list
+     * with a "Cancel" button and no explanation.
+     *
+     * The code's own comment said the gate should cover "whichever halves the
+     * plan actually restores"; the DECISION was scoped and the WORK was not.
+     *
+     * Two rules:
+     *  - the plan's packages go INTO the check, not only into the decision
+     *    that follows it; and
+     *  - the gate owns the run screen while it works, so the wait is visible
+     *    and the user can cancel it.
+     */
+    @Test
+    fun `the pre-restore gate checks the plan and shows on the run screen`() {
+        val src = code(
+            read(
+                File(
+                    repoRoot,
+                    "app/src/main/kotlin/com/phoenix/droidvault/utils/AutomationRunner.kt"
+                )
+            )
+        )
+        val gate = rustSpanLike(src, "executeLocked")
+        assertNotNull("could not find executeLocked — re-point this guard", gate)
+        val body = gate!!
+
+        // 1. The plan's packages go into the CHECK.
+        val appsHalfCall = callSpan(body, "verifyBackups")
+        assertNotNull("could not find the gate's verifyBackups call — re-point this guard", appsHalfCall)
+        assertTrue(
+            "the gate must pass the plan's packages into the check, not only into " +
+                "the decision that follows it: the check's cost is the bytes it " +
+                "reads, and hashing the whole vault to vouch for eight apps was 85 " +
+                "seconds of waiting",
+            Regex("""packages\s*=\s*restoring""").containsMatchIn(appsHalfCall!!)
+        )
+        // 2. The gate is on the run screen while it works. The SHAPE of the call
+        // site is checked here and the EFFECT is checked by `GateScreenTest`,
+        // because a guard on the presence of a call is not a guard on its
+        // effect (§4.67): `val gateStarted = false && startGateScreen(…)` would
+        // still contain the call and still never put the screen up.
+        assertTrue(
+            "the gate must put the run screen up while it works: it used to run " +
+                "before the tracker was seeded, so the page did not exist and the " +
+                "wait was unexplained",
+            Regex("""val\s+gateStarted\s*=\s*startGateScreen\s*\(""").containsMatchIn(body)
+        )
+        assertTrue(
+            "the gate must release the tracker it claimed, or the app phase's own " +
+                "run is refused as a second live run",
+            Regex("""ProgressTracker\.endRun\(gateOwner\)""").containsMatchIn(body)
+        )
+        // 3. The engine refuses to narrow a check it cannot read.
+        val engine = code(read(File(repoRoot, "engine/src/verify.rs")))
+        val parser = rustSpanLike(engine, "parse_package_filter")
+        assertNotNull("could not find parse_package_filter — re-point this guard", parser)
+        assertTrue(
+            "a filter the engine cannot read must check EVERYTHING: a filter that " +
+                "narrows the check by accident would let the gate vouch for bytes " +
+                "nobody read",
+            parser!!.contains("valid_package") && parser.contains("return None")
+        )
+    }
+
     @Test
     fun `a restored tree is labelled for the app that has to read it`() {
         // Found on device (POCO F6, Android 16): every file a restore placed under
@@ -2929,6 +3245,445 @@ class ConventionGuardTest {
             "LinearEasing is reached for directly — a rotation must go through " +
                 "DvMotion.rotate(), which is where the linear-curve reason lives. " +
                 "At ${offenders.joinToString()}",
+            offenders.isEmpty()
+        )
+    }
+
+    /**
+     * A card's action row holds the primary action, and the primary's own
+     * LABEL must fit in it.
+     *
+     * The configuration card's row is 379 dp wide and carries an overflow
+     * button (48 dp) at the right. A third action was added to it — a Reset
+     * for the configuration's excluded apps — and the row stopped fitting:
+     * the primary's label was clipped mid-word, "Run backup" rendering as
+     * "Run bac", while every card without a Reset showed it in full. The
+     * button was not disabled and the text was not overflowing its own
+     * bounds; the row simply had no room left, and Compose clipped the
+     * label to whatever fitted.
+     *
+     * Nothing about that is visible in the code: the third button was written
+     * correctly, each with `maxLines = 1, softWrap = false`, and the primary
+     * kept its `weight(1f)` — so the primary got whatever was left, which was
+     * 77 dp for a label that needs about 82.
+     *
+     * So the rule is stated on the thing that is decidable: the number of
+     * LABEL-BEARING controls in the action row. A tertiary action does not
+     * go in this row; it goes on the line above it, beside the thing it
+     * acts on, which is where the Reset lives now.
+     *
+     * The overflow button does not count: it is a 48 dp icon, not a label,
+     * and it is the row's fixed right-hand anchor.
+     *
+     * Mutation-verified: putting a third labelled button back into the row
+     * fails this, and the row it parses is asserted to hold the two buttons
+     * it expects — a guard that finds nothing has examined nothing (§4.66).
+     */
+    @Test
+    fun `a configuration card's action row holds no more than two labelled actions`() {
+        val file = File(
+            repoRoot,
+            "app/src/main/kotlin/com/phoenix/droidvault/ui/screens/AutomateScreen.kt"
+        )
+        val src = file.readText()
+
+        // The action row is the Row that carries the Preview button. Anchored
+        // on the callback rather than on the composable's name, so the guard
+        // follows the row if the card is renamed.
+        val anchor = src.indexOf("onClick = onPreview")
+        assertTrue(
+            "the configuration card's Preview action was not found — this " +
+                "guard is examining nothing, which is how a rule reads as " +
+                "enforced while enforcing nothing",
+            anchor > 0
+        )
+        // The nearest Row CALL before it. `lastIndexOf("Row")` would find
+        // "LazyRow" or "FlowRow" instead, so the call's paren is required.
+        val rowCall = Regex("""\bRow\s*\(""").findAll(src.take(anchor)).toList().lastOrNull()
+        assertNotNull(
+            "the Preview action is not inside a Row, so the action row cannot " +
+                "be located",
+            rowCall
+        )
+        val rowOpen = rowCall!!.range.first
+        // The Row's OWN span: its argument list AND its trailing lambda, which
+        // is where the buttons are. Matching the parens alone would take the
+        // argument list — `verticalAlignment = ..., horizontalArrangement = ...`
+        // — and the region would hold no button at all, so the guard would
+        // report a clean row having examined nothing (§4.66).
+        var depth = 0
+        var i = src.indexOf('(', rowOpen)
+        var end = -1
+        while (i < src.length) {
+            if (src[i] == '(') depth++
+            if (src[i] == ')') {
+                depth--
+                if (depth == 0) { end = i; break }
+            }
+            i++
+        }
+        assertTrue("the action row's parentheses do not close", end > 0)
+        var body = end + 1
+        while (body < src.length && src[body].isWhitespace()) body++
+        if (body < src.length && src[body] == '{') {
+            var d = 0
+            var k = body
+            while (k < src.length) {
+                if (src[k] == '{') d++
+                if (src[k] == '}') {
+                    d--
+                    if (d == 0) { end = k; break }
+                }
+                k++
+            }
+        }
+        val row = src.substring(rowOpen, end + 1)
+
+        val labelled = Regex("""\b(OutlinedButton|TextButton|FilledTonalButton|DvButton|Button)\s*\(""")
+            .findAll(row)
+            .map { it.groupValues[1] }
+            .toList()
+
+        assertTrue(
+            "the configuration card's action row was not found — the Preview " +
+                "and Run buttons it expects are not both there, so this guard " +
+                "is examining nothing",
+            labelled.size >= 2
+        )
+        assertTrue(
+            "the configuration card's action row carries ${labelled.size} " +
+                "labelled actions ($labelled). The row is 379 dp wide and the " +
+                "primary's label has to fit in it: a third action clipped " +
+                "\"Run backup\" to \"Run bac\". Put a tertiary action on the " +
+                "line above the row, beside the thing it acts on.",
+            labelled.size <= 2
+        )
+    }
+
+    /**
+     * The body of a composable, by its name.
+     *
+     * From the function's opening brace to its matching close, so a guard
+     * examines THAT function and not the next one. A fixed window of lines or
+     * characters is what this file's own history records as the thing that
+     * makes a guard report a clean tree having examined nothing (§4.66).
+     */
+    private fun composableBody(src: String, name: String): String {
+        val start = src.indexOf("fun $name(")
+        if (start < 0) return ""
+        var i = src.indexOf('(', start)
+        var depth = 0
+        while (i < src.length) {
+            if (src[i] == '(') depth++
+            if (src[i] == ')') {
+                depth--
+                if (depth == 0) break
+            }
+            i++
+        }
+        if (i >= src.length) return ""
+        var b = i + 1
+        while (b < src.length && src[b].isWhitespace()) b++
+        if (b >= src.length || src[b] != '{') return ""
+        var d = 0
+        var k = b
+        while (k < src.length) {
+            if (src[k] == '{') d++
+            if (src[k] == '}') {
+                d--
+                if (d == 0) return src.substring(b + 1, k)
+            }
+            k++
+        }
+        return ""
+    }
+
+    /**
+     * A dry run lists what the configuration WILL do.
+     *
+     * The preview used to list what it would NOT do, and the list was the
+     * screen: 336 rows of "no matching rule" for a configuration covering
+     * eight apps, and for a device-data configuration — which does no apps at
+     * all — 344 of them, under a headline that read "0 processable". The
+     * number was worth keeping; the rows were not.
+     *
+     * Two rules, both decidable from the source:
+     *
+     *  - **The uncovered apps are a COUNT.** The preview may not read the
+     *    skipped entries at all; the count comes from the layout
+     *    (`models/PreviewLayout.kt`), which decides it in one place.
+     *  - **There is ONE implementation of that decision.** Both previews call
+     *    `previewLayout(...)`; a preview that re-derives the shape for itself
+     *    is the drift this project keeps paying for (invariant 18).
+     *
+     * The guard also checks that each preview still renders a ready list —
+     * without that marker it would be examining the wrong function and
+     * reporting a clean tree having looked at nothing.
+     *
+     * Mutation-verified: putting the skipped list back fails it, and so does
+     * a preview that re-derives the shape instead of asking the layout.
+     */
+    @Test
+    fun `a preview lists what a configuration will do, not what it will not`() {
+        val file = File(
+            repoRoot,
+            "app/src/main/kotlin/com/phoenix/droidvault/ui/screens/AutomateScreen.kt"
+        )
+        val src = codeKeepLines(file.readText())
+        val offenders = mutableListOf<String>()
+
+        for (name in listOf("PreviewScreen", "RestorePreviewScreen")) {
+            val body = composableBody(src, name)
+            assertTrue(
+                "could not find $name in AutomateScreen.kt — this guard is " +
+                    "examining nothing, which is how a rule reads as enforced " +
+                    "while enforcing nothing",
+                body.isNotEmpty()
+            )
+            assertTrue(
+                "$name no longer renders a ready list — this guard is looking " +
+                    "at the wrong function",
+                body.contains("Ready for ")
+            )
+            if (!body.contains("previewLayout(")) {
+                offenders += "$name does not ask models/PreviewLayout.kt what to " +
+                    "show — two copies of that decision drift"
+            }
+            if (Regex("""\bskipped\b""").containsMatchIn(body)) {
+                offenders += "$name reads the skipped apps — the apps a " +
+                    "configuration does not cover are a count, not a list"
+            }
+        }
+
+        assertTrue(
+            "a dry run must show what the configuration will do:\n" +
+                offenders.joinToString("\n"),
+            offenders.isEmpty()
+        )
+    }
+
+    /**
+     * The app's action button is the tonal one.
+     *
+     * The filled `Button` painted `primary` — a fully saturated periwinkle —
+     * with a near-black navy label on it, on a near-black page: a bright slab
+     * at 8.6:1 against the background, for an action the user has to aim at.
+     * The accent left blue (`Color.kt`) and the button became a **plate**: a
+     * deep tint of the accent carrying the accent as its label, at ~1.4:1
+     * against the page.
+     *
+     * `DvButton` is that button, and this is the rule that keeps it. A
+     * `Button` with the tonal colours written out at the call site would be
+     * correct in every one of those places and wrong in the sixty-eighth —
+     * and wrong SILENTLY, because a filled button and a tonal one look
+     * nothing alike, so nothing would report it. The loud button comes back
+     * only by saying so.
+     *
+     * The one exception is the component itself.
+     *
+     * Mutation-verified: putting a plain `Button(` back fails it.
+     */
+    @Test
+    fun `the app's action button is the tonal one`() {
+        val offenders = mutableListOf<String>()
+        var seen = 0
+        for (file in kotlinSources()) {
+            val relative = file.relativeTo(mainSrc).path
+            if (relative.endsWith("ui/components/DvButton.kt")) continue
+            val src = codeKeepLines(file.readText())
+            // A plain `Button(` — not OutlinedButton, TextButton, IconButton,
+            // FilledTonalButton or ButtonDefaults.
+            for (m in Regex("""(?<![A-Za-z])Button\s*\(""").findAll(src)) {
+                val line = src.substring(0, m.range.first).count { it == '\n' } + 1
+                offenders += "$relative:$line"
+            }
+            // And the other way in: a DvButton that overrides its colours with
+            // Material's FILLED default. The completion screen's "Finish"
+            // button did exactly that, and the loud button came back on one
+            // screen without a word of complaint.
+            for (m in Regex("""ButtonDefaults\.buttonColors\(\s*\)""").findAll(src)) {
+                val line = src.substring(0, m.range.first).count { it == '\n' } + 1
+                offenders += "$relative:$line (Material's filled default)"
+            }
+            seen += Regex("""\bDvButton\s*\(""").findAll(src).count()
+        }
+        assertTrue(
+            "the app's action button is DvButton — a plain Button( is the loud " +
+                "one this rule removed: ${offenders.joinToString()}",
+            offenders.isEmpty()
+        )
+        assertTrue(
+            "no DvButton call was found at all — this guard is examining " +
+                "nothing, which is how a rule reads as enforced while enforcing " +
+                "nothing",
+            seen > 10
+        )
+    }
+
+    /**
+     * A destructive confirmation wears the error role.
+     *
+     * The delete/erase/remove/clear confirmations used to be painted like
+     * every other action, so the one button on the screen that destroys
+     * something was the same colour as the one that does not. The rule here
+     * is the inversion: **the only saturated thing on a confirmation screen
+     * is the thing that destroys.**
+     *
+     * Checked by the label, so a button whose label is a variable is not
+     * judged — this catches the case it is written for, which is a
+     * hand-written "Delete".
+     */
+    @Test
+    fun `a destructive confirmation wears the error role`() {
+        // The label must START with the destructive word, not merely contain
+        // it: "I've Removed It - Verify Again" and "Freeze disables the app
+        // reversibly (safer than uninstall)" are not destructive actions, and
+        // the first version of this guard flagged both.
+        val destructive = listOf(
+            "delete", "erase", "remove", "trash", "wipe", "uninstall", "clear",
+            "format", "factory reset", "move to"
+        )
+        val offenders = mutableListOf<String>()
+        var checked = 0
+        for (file in kotlinSources()) {
+            val relative = file.relativeTo(mainSrc).path
+            val src = codeKeepLines(file.readText())
+            for (m in Regex("""\bDvButton\s*\(""").findAll(src)) {
+                // The label lives in the TRAILING lambda, after the call's
+                // closing paren. The FIRST literal label in that window is the
+                // button's own — a later one belongs to the next control.
+                // The window is 500 characters because the multi-line form puts
+                // the label that far from the call: a narrower window missed
+                // every one of them, and the guard reported a clean tree
+                // having examined nothing.
+                val window = src.substring(m.range.last + 1, (m.range.last + 500).coerceAtMost(src.length))
+                val label = Regex("Text\\(\\s*\"([^\"]*)\"")
+                    .find(window)?.groupValues?.get(1) ?: continue
+                val lower = label.lowercase()
+                if (destructive.none { lower.startsWith(it) }) continue
+                checked++
+                val call = window.substringBefore(") {")
+                if (!call.contains("colorScheme.error")) {
+                    val line = src.substring(0, m.range.first).count { it == '\n' } + 1
+                    offenders += "$relative:$line \"$label\""
+                }
+            }
+        }
+        assertTrue(
+            "a destructive confirmation must wear the error role, so the only " +
+                "saturated thing on the screen is the thing that destroys: " +
+                offenders.joinToString(),
+            offenders.isEmpty()
+        )
+        assertTrue(
+            "no destructive confirmation was found at all — this guard is " +
+                "examining nothing, which is how a rule reads as enforced while " +
+                "enforcing nothing",
+            checked >= 5
+        )
+    }
+
+    /**
+     * The archive extension is named in ONE place, and the old name is only
+     * ever a fallback.
+     *
+     * A vault archive used to be `*.shift`; it is now `*.vault`. The name is
+     * a WIRE FORMAT, not a label: every archive already on a user's card
+     * carries the old one, and a reader that stopped looking for it would
+     * report an empty vault — the user's backups invisible rather than
+     * missing.
+     *
+     * So the old name may be NAMED in exactly one place per side — the
+     * vocabulary that resolves it — and nowhere else. A `.shift` literal
+     * anywhere else is a hard-coded name that a rename has to hunt down one
+     * day, and the hunt is exactly how a half-renamed format ends up with two
+     * spellings of one thing.
+     */
+    @Test
+    fun `the archive extension is named in one place`() {
+        // The files that are ALLOWED to spell an extension out: the vocabulary
+        // on each side, the migration that renames what is on disk, the
+        // trash's display trimming, and the one archive whose WRITE name is a
+        // constant of its own.
+        val allowed = setOf(
+            "com/phoenix/droidvault/models/VaultArchive.kt",
+            "com/phoenix/droidvault/VaultExtensionMigration.kt",
+            "com/phoenix/droidvault/models/Trash.kt",
+            "com/phoenix/droidvault/utils/BackupConfigFolders.kt"
+        )
+        val offenders = mutableListOf<String>()
+
+        // A quoted `.vault` or `.shift` at the END of the literal: a NAME.
+        //
+        // The pattern is deliberately tight. A looser one (`[^"]*` between two
+        // quotes) matches across a whole file whenever a stray quote makes the
+        // span unbalanced, and it flagged `overview?.vaultKb` — a Kotlin
+        // property, not a file name. A guard that reports the wrong thing
+        // gets deleted, so this one has to mean what it says.
+        val namePattern = Regex("\"[^\"\\n]*\\.(vault|shift)\"")
+
+        for (file in kotlinSources()) {
+            val relative = file.relativeTo(mainSrc).path
+            if (relative in allowed) continue
+            val src = codeKeepLines(file.readText())
+            for (m in namePattern.findAll(src)) {
+                val line = src.substring(0, m.range.first).count { it == '\n' } + 1
+                offenders += "$relative:$line  ${m.value}"
+            }
+        }
+        // The engine: every source file but the vocabulary.
+        val engineDir = File(repoRoot, "engine/src")
+        if (engineDir.isDirectory) {
+            engineDir.walkTopDown().filter { it.isFile && it.extension == "rs" }.forEach { file ->
+                if (file.name == "vault.rs") return@forEach
+                // The engine's TEST module is where the legacy name is
+                // exercised on purpose; the shipped code must not name it.
+                val src = codeKeepLines(file.readText()).substringBefore("#[cfg(test)]")
+                for (m in namePattern.findAll(src)) {
+                    val line = src.substring(0, m.range.first).count { it == '\n' } + 1
+                    offenders += "engine/${file.name}:$line  ${m.value}"
+                }
+            }
+        }
+
+        assertTrue(
+            "the archive extension is named in the vocabulary and nowhere else:\n" +
+                offenders.joinToString("\n"),
+            offenders.isEmpty()
+        )
+    }
+
+    /**
+     * A device archive is RESOLVED, never spelled out at the call site.
+     *
+     * The extension moved, and a reader that hard-codes one name finds the
+     * archive only when it happens to carry that name — so a scheduled
+     * restore reports "no backup archive" for an archive that is there, and
+     * the Folders manifest reads as empty.
+     *
+     * The resolution lives in one place ([DeviceManager.resolveDeviceArchive]),
+     * so the guard is that no call site builds a device archive path out of a
+     * literal: it must ask the resolver which file is on disk.
+     */
+    @Test
+    fun `a device archive path is resolved, not spelled out`() {
+        val offenders = mutableListOf<String>()
+        val pattern = Regex("\"\\\$\\{?[A-Za-z]*[Dd]ir\\}?/[^\"]*\\.(vault|shift)\"")
+
+        for (file in kotlinSources()) {
+            val relative = file.relativeTo(mainSrc).path
+            if (relative == "com/phoenix/droidvault/models/VaultArchive.kt") continue
+            val src = codeKeepLines(file.readText())
+            for (m in pattern.findAll(src)) {
+                val line = src.substring(0, m.range.first).count { it == '\n' } + 1
+                offenders += "$relative:$line  ${m.value}"
+            }
+        }
+
+        assertTrue(
+            "a device archive path must be resolved through " +
+                "DeviceManager.resolveDeviceArchive, not built from a literal:\n" +
+                offenders.joinToString("\n"),
             offenders.isEmpty()
         )
     }

@@ -11,6 +11,7 @@ import com.phoenix.droidvault.models.ConfigOperation
 import com.phoenix.droidvault.models.LiveOp
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.models.PartState
+import com.phoenix.droidvault.models.Parts
 import com.phoenix.droidvault.models.PlannableApp
 import com.phoenix.droidvault.models.ResultState
 import com.phoenix.droidvault.models.TrackerEvent
@@ -339,7 +340,7 @@ object AutomationRunner {
                 { c -> AutomationCapability.reasonFor(c, hasRoot, allowPerm, allowSsaid) }
             val assignments = AutomationStore.listAssignments(context)
             // RESTORE: feed the planner what the backup folder actually holds
-            // (same Meta.txt/shift-file inventory the Migrate tab's restore list
+            // (same Meta.txt/archive inventory the Migrate tab's restore list
             // shows) so the plan restores the parts that exist — or skips apps
             // with no backup, instead of blindly requesting missing files.
             // CRITICAL: for restore, the backup-folder list is ALSO the planning
@@ -410,7 +411,7 @@ object AutomationRunner {
             // so one check covers apps AND device data (§2.44's defect fixed on
             // the display side). The restore gate that confirms those same bytes
             // before restoring them must use the same scope: an app-only verdict
-            // never read Messages.shift / CallLogs.shift / Folders.shift, so an
+            // never read Messages.vault / CallLogs.vault / Folders.vault, so an
             // app-only restore plan that does not touch device data still gates
             // apps correctly, but anything that restores device data (or a mixed
             // run) must see the device verdict too.
@@ -420,7 +421,7 @@ object AutomationRunner {
             // `engineApps.isNotEmpty()`, so a config that restored only messages
             // and calls was never verified at all — and the device verdict it did
             // fetch for mixed runs was never consulted, so a damaged
-            // `Messages.shift` was restored headlessly by a scheduled run with
+            // `Messages.vault` was restored headlessly by a scheduled run with
             // nobody watching. Same defect as §2.44, one path further out.
             if (config.operation == ConfigOperation.RESTORE) {
                 val restoring = engineApps.map { it.packageName }.toSet()
@@ -430,20 +431,62 @@ object AutomationRunner {
                     // will not touch is a full pass over the vault to answer a
                     // question nobody asked, and a device archive outside the plan
                     // must not block the apps that are inside it.
-                    val appsHalf = if (restoring.isNotEmpty()) {
-                        MigratorManager.verifyBackups(
-                            context, resolveSavedPath(context), deviceData = false
+                    //
+                    // The plan's packages go INTO the check, not only into the
+                    // decision that follows it. The check's cost is the bytes it
+                    // reads: measured on the reference device, checking all 110
+                    // apps (15.8 GB) to vouch for eight of them (1.4 GB) was 85
+                    // seconds of waiting before the restore even started — four
+                    // fifths of the wall clock for a ninth of the bytes.
+                    //
+                    // The gate is on the RUN SCREEN while it works. It used to
+                    // run before the tracker was seeded, so the page did not
+                    // exist yet and the user was left looking at a config list
+                    // with a "Cancel" button and no explanation of the wait.
+                    val gateOwner = "automation-gate:${config.id}"
+                    val gateSeeds = engineApps.map { app ->
+                        com.phoenix.droidvault.models.AppSeed(
+                            packageName = app.packageName,
+                            label = app.label,
+                            isSystem = app.isSystem,
+                            iconPath = null,
+                            parts = listOf(Parts.APP),
+                            sizeKb = app.appSizeKb + app.dataSizeKb + app.mediaSizeKb,
                         )
-                    } else {
-                        null
                     }
-                    val deviceHalf = if (restoringDevice.isNotEmpty()) {
-                        MigratorManager.verifyBackups(
-                            context, resolveSavedPath(context), deviceData = true
-                        )
-                    } else {
-                        null
-                    }
+                    val gateStarted = startGateScreen(
+                        gateOwner,
+                        gateSeeds,
+                        trigger == com.phoenix.droidvault.models.TriggerType.MANUAL
+                    )
+                    try {                        val appsHalf = if (restoring.isNotEmpty()) {
+                            MigratorManager.verifyBackups(
+                                context, resolveSavedPath(context), deviceData = false,
+                                packages = restoring,
+                                onProgress = { checked, total ->
+                                    if (gateStarted) {
+                                        ProgressTracker.prepare(
+                                            "Verifying backups — $checked of $total",
+                                            if (total > 0) (checked * 100 / total) else 0
+                                        )
+                                    }
+                                    updateProgress(
+                                        "Verifying backups",
+                                        "Checked $checked of $total backups",
+                                        -1
+                                    )
+                                }
+                            )
+                        } else {
+                            null
+                        }
+                        val deviceHalf = if (restoringDevice.isNotEmpty()) {
+                            MigratorManager.verifyBackups(
+                                context, resolveSavedPath(context), deviceData = true
+                            )
+                        } else {
+                            null
+                        }
                     // One verdict from both halves, by the same tested merge the
                     // manual check uses — so the device rows reach the device gate
                     // instead of living in a second report nobody reads.
@@ -466,10 +509,20 @@ object AutomationRunner {
                         DroidVaultLogger.w(
                             "Verify", "Scheduled restore refused: $blocked"
                         )
+                        // The run screen says it too: the gate is on the screen
+                        // while it works, so it must not vanish when it refuses.
+                        if (gateStarted) ProgressTracker.fail("Restore refused", blocked)
                         execution.result = ResultState.FAILED
                         execution.errorSummary = blocked
                         finishExecution(context, execution)
                         return execution
+                    }
+                    } finally {
+                        // The gate's run is over: release the tracker so the app
+                        // phase can take it. The state stays on screen (the
+                        // restore's own run replaces it a moment later), and a
+                        // refusal keeps its failed verdict.
+                        if (gateStarted) ProgressTracker.endRun(gateOwner)
                     }
                 }
             }
@@ -694,7 +747,7 @@ object AutomationRunner {
         val title = if (isBackup) "Backing up Device Data" else "Restoring Device Data"
         updateProgress(title, "Preparing…", 0)
         // Missing-archive guard FIRST (restore only): a scheduled restore with
-        // no Messages.shift / Wallpaper.shift in the backup folder would
+        // no Messages.vault / Wallpaper.vault in the backup folder would
         // "restore" nothing and still report success. Checked through the ROOT
         // shell — java.io cannot see the backup dir under scoped storage.
         // Missing items are SKIPPED with an explicit reason, never silently
@@ -736,12 +789,12 @@ object AutomationRunner {
         }
         if (!isBackup) {
             val backupDir = resolveSavedPath(context) + "/Device"
+            // The SAME resolution the restore itself uses: the archive under
+            // either extension is this item's archive, and a check that knew
+            // only the new name would report a present archive as missing —
+            // which is exactly the "one gate, one implementation" rule.
             val missing = finalSet.filter { item ->
-                val file = deviceBackupFileFor(item)
-                val res = com.topjohnwu.superuser.Shell.cmd(
-                    "[ -f ${ShellQuote.q("$backupDir/$file")} ] && echo y"
-                ).exec()
-                res.out.firstOrNull()?.trim() != "y"
+                DeviceManager.resolveDeviceArchive(backupDir, item.archiveBase) == null
             }
             if (missing.isNotEmpty()) {
                 missing.forEach { item ->
@@ -982,15 +1035,8 @@ object AutomationRunner {
     }
 
     /** Archive file the Migrate-tab pipeline writes for one device item. */
-    fun deviceBackupFileFor(item: com.phoenix.droidvault.models.DeviceDataItem): String = when (item) {
-        com.phoenix.droidvault.models.DeviceDataItem.MESSAGES -> "Messages.shift"
-        com.phoenix.droidvault.models.DeviceDataItem.CALLS -> "CallLogs.shift"
-        com.phoenix.droidvault.models.DeviceDataItem.CONTACTS -> "Contacts.shift"
-        com.phoenix.droidvault.models.DeviceDataItem.WIFI -> "Wi-Fi.shift"
-        com.phoenix.droidvault.models.DeviceDataItem.WALLPAPER -> "Wallpaper.shift"
-        com.phoenix.droidvault.models.DeviceDataItem.BLUETOOTH -> "Bluetooth.shift"
-        com.phoenix.droidvault.models.DeviceDataItem.FOLDERS -> BackupConfigFolders.ARCHIVE_FILE
-    }
+    fun deviceBackupFileFor(item: com.phoenix.droidvault.models.DeviceDataItem): String =
+        com.phoenix.droidvault.models.VaultArchive.deviceName(item)
 
     /**
      * Cache entry a device item's RESTORE must produce — the only honest
@@ -1079,4 +1125,33 @@ object AutomationRunner {
         } catch (_: Exception) {
         }
     }
+}
+
+/**
+ * Put the run screen up for the pre-restore gate, and say whether it took.
+ *
+ * The gate runs BEFORE the restore, and it used to run before the tracker was
+ * seeded: the Processing page did not exist yet, so the wait was a config list
+ * with a "Cancel" button and no explanation of what was happening (measured:
+ * 85 seconds of hashing the whole vault before an eight-app restore began).
+ *
+ * A named function rather than an inline call, so a test can assert the
+ * BEHAVIOUR — the tracker really is Running with the plan's apps on it — and
+ * the guard can assert the call site's shape. A guard on the presence of a
+ * call is not a guard on its effect (§4.67), and this one is deliberately
+ * built so that the two halves fail independently.
+ */
+internal fun startGateScreen(
+    ownerId: String,
+    seeds: List<AppSeed>,
+    interactive: Boolean
+): Boolean {
+    if (seeds.isEmpty()) return false
+    return ProgressTracker.startRun(
+        ownerId = ownerId,
+        op = LiveOp.RESTORE,
+        seeds = seeds,
+        title = "Verifying backups",
+        interactive = interactive,
+    )
 }

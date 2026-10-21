@@ -54,7 +54,6 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -98,6 +97,7 @@ import com.phoenix.droidvault.MainViewModel
 import com.phoenix.droidvault.models.AppState
 import com.phoenix.droidvault.models.FlashAction
 import com.phoenix.droidvault.ui.components.CircularCheckbox
+import com.phoenix.droidvault.ui.components.DvButton
 import com.phoenix.droidvault.ui.components.MenuCard
 import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.dvAccent
@@ -253,7 +253,7 @@ fun FlashTab(
                 }
             },
             confirmButton = {
-                Button(
+                DvButton(
                     onClick = {
                         if (selectedBackupPartitions.isNotEmpty()) {
                             selectedBackupPartitions.forEach { part ->
@@ -430,7 +430,7 @@ fun FlashTab(
                 }
             },
             confirmButton = {
-                Button(
+                DvButton(
                     onClick = {
                         if (restoreMode == "backup" && selectedPartition.isNotBlank()) {
                             val partName = selectedPartition.substringBefore("_backup.img")
@@ -576,7 +576,7 @@ fun FlashTab(
                             }
                         }
                         Spacer(modifier = Modifier.weight(1f))
-                        Button(
+                        DvButton(
                             onClick = { isAppending = false; zipLauncher.launch(arrayOf("application/zip")) },
                             shape = CircleShape,
                             modifier = Modifier
@@ -734,7 +734,7 @@ fun FlashTab(
                                     Text("Add More ZIPs", style = MaterialTheme.typography.titleMedium)
                                 }
                                 Spacer(modifier = Modifier.width(12.dp))
-                                Button(onClick = { viewModel.checkLockscreenAndProceed() }, shape = CircleShape, modifier = Modifier
+                                DvButton(onClick = { viewModel.checkLockscreenAndProceed() }, shape = CircleShape, modifier = Modifier
                                     .weight(1f)
                                     .height(52.dp)) {
                                     Text("Next", style = MaterialTheme.typography.titleMedium)
@@ -771,16 +771,19 @@ fun FlashTab(
                                     Text(warningText, textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onErrorContainer)
 
                                     Spacer(modifier = Modifier.height(24.dp))
-                                    Button(
+                                    DvButton(
                                         onClick = { context.startActivity(Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)) },
                                         shape = CircleShape,
-                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.onErrorContainer)
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.onErrorContainer,
+                                            contentColor = MaterialTheme.colorScheme.errorContainer
+                                        )
                                     ) { Text("Open Settings", style = MaterialTheme.typography.titleMedium) }
                                 }
                             }
                             Spacer(modifier = Modifier.weight(1f))
                             Column(modifier = Modifier.fillMaxWidth()) {
-                                Button(onClick = { viewModel.checkLockscreenAndProceed() }, shape = CircleShape, modifier = Modifier
+                                DvButton(onClick = { viewModel.checkLockscreenAndProceed() }, shape = CircleShape, modifier = Modifier
                                     .fillMaxWidth()
                                     .height(52.dp)) {
                                     Text("I've Removed It - Verify Again", style = MaterialTheme.typography.titleMedium)
@@ -832,7 +835,7 @@ fun FlashTab(
                             }
                             }
                             Spacer(modifier = Modifier.weight(1f))
-                            Button(onClick = { viewModel.generateOrsAndProceed() }, shape = CircleShape, modifier = Modifier
+                            DvButton(onClick = { viewModel.generateOrsAndProceed() }, shape = CircleShape, modifier = Modifier
                                 .fillMaxWidth()
                                 .height(52.dp)) {
                                 Text("Next: Finalize", style = MaterialTheme.typography.titleMedium)
@@ -924,10 +927,13 @@ fun FlashTab(
                             }
                             Spacer(modifier = Modifier.weight(1f))
                             Column(modifier = Modifier.fillMaxWidth()) {
-                                Button(
+                                DvButton(
                                     onClick = { viewModel.executeFlashNow() },
                                     shape = CircleShape,
-                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.error,
+                                        contentColor = MaterialTheme.colorScheme.onError
+                                    ),
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .height(52.dp)

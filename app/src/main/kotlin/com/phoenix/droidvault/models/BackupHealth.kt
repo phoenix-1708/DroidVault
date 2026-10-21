@@ -183,7 +183,7 @@ data class BackupHealth(
             }
             // The claim must match what was checked. Both entry points used to call
             // `verifyVault()` with the default deviceData = false, i.e. --verify-apps
-            // only, so Messages.shift, CallLogs.shift and Folders.shift were never
+            // only, so Messages.vault, CallLogs.vault and Folders.vault were never
             // read and "each archive can be restored" was untrue. B-01 made one
             // check cover apps AND device data, so both are now genuinely verified
             // and this wording is earned. If a caller ever passes deviceData = false
@@ -193,7 +193,7 @@ data class BackupHealth(
             // A device-only verdict names device archives one by one, so a damaged
             // device archive shows up here exactly like a damaged app does: the card
             // says how many, and the detail names them. Without that, a damaged
-            // Messages.shift would only ever be reachable as "1 damaged" on the
+            // Messages.vault would only ever be reachable as "1 damaged" on the
             // restore gate, and the Home card would keep saying "All readable".
             // That was the damaged-backup bug for device data: the card was never
             // taught about device archives being damaged, only about them being
@@ -240,7 +240,7 @@ data class BackupHealth(
          * happened to the vault since it was taken.
          *
          * A finding is not withdrawn by a later run — that is the rule (§2.46) —
-         * which leaves the card stating "CallLogs.shift changed" in the present
+         * which leaves the card stating "CallLogs.vault changed" in the present
          * tense about an archive four runs and a week old. The honest reading is
          * the one this line gives: when it was first seen, and that a run has been
          * over the vault since, so it may already be repaired. Both clauses come

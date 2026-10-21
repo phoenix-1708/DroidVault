@@ -2,6 +2,7 @@ package com.phoenix.droidvault
 
 import com.phoenix.droidvault.utils.SmsViaRoot
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -247,5 +248,46 @@ class SmsRestoreScriptTest {
         val s = script(sampleRow(), sampleRow(date = 1750000000001L))
         assertTrue("each row needs its own insert call", s.lines().count { it.startsWith("insert_one ") } == 2)
         assertTrue("the count line must still be emitted", s.contains("echo \"DVCOUNT=\$N\""))
+    }
+
+    /**
+     * A body that differs only in TRAILING whitespace is the same message.
+     *
+     * Measured on the reference device (POCO F6, Android 17): one archived
+     * message ended in a newline — "…SSC (SR)\n" — and the write path cannot
+     * keep it, because the generated script decodes the body with
+     * `M=$(… | base64 -d)` and a command substitution strips trailing
+     * newlines. So the archive's spelling and the store's spelling never
+     * matched, and two things followed that the user reported as "some
+     * messages returned": every restore re-inserted that message (three
+     * copies of one message in a store of eighty), and the read-back then
+     * reported the message it had just written as "1 message(s) could not be
+     * written".
+     */
+    @Test
+    fun `a trailing newline does not make a message a different message`() {
+        val withNewline = SmsViaRoot.signature("+15550100", 1750000000000L, "hello world\n")
+        val without = SmsViaRoot.signature("+15550100", 1750000000000L, "hello world")
+        assertEquals(
+            "the archived body and the stored body are the same message; the " +
+                "write path strips the trailing newline, so the comparison has to",
+            withNewline,
+            without
+        )
+        assertNotEquals(
+            "a different body is still a different message",
+            without,
+            SmsViaRoot.signature("+15550100", 1750000000000L, "hello worlds")
+        )
+        assertNotEquals(
+            "a different date is still a different message",
+            without,
+            SmsViaRoot.signature("+15550100", 1750000000001L, "hello world")
+        )
+        assertEquals(
+            "a number that arrives with a stray space is the same number",
+            without,
+            SmsViaRoot.signature(" +15550100 ", 1750000000000L, "hello world")
+        )
     }
 }

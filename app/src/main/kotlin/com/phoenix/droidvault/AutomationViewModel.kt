@@ -26,6 +26,7 @@ import com.phoenix.droidvault.utils.AutomationStore
 import com.phoenix.droidvault.utils.BackupConfigFolders
 import com.phoenix.droidvault.utils.BackupFolderStore
 import com.phoenix.droidvault.utils.BackupPlanner
+import com.phoenix.droidvault.utils.DroidVaultLogger
 import com.phoenix.droidvault.utils.InstallerPolicy
 import com.phoenix.droidvault.utils.MigratorManager
 import com.phoenix.droidvault.utils.SettingsManager
@@ -415,7 +416,8 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
         fallback: FallbackPolicy? = null,
         restoreGraceful: Boolean? = null,
         deviceData: Set<DeviceDataItem>? = null,
-        folderPaths: List<String>? = null
+        folderPaths: List<String>? = null,
+        excludedPackages: Set<String>? = null
     ) {
         _uiState.update { state ->
             val wrap = state.editingRestoreConfig ?: return@update state
@@ -430,6 +432,7 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
                         restoreGraceful = restoreGraceful ?: cfg.restoreGraceful,
                         deviceData = deviceData ?: cfg.deviceData,
                         folderPaths = folderPaths ?: cfg.folderPaths,
+                        excludedPackages = excludedPackages ?: cfg.excludedPackages,
                         updatedAt = System.currentTimeMillis()
                     )
                 )
@@ -555,7 +558,8 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
         fallback: FallbackPolicy? = null,
         operation: ConfigOperation? = null,
         deviceData: Set<DeviceDataItem>? = null,
-        folderPaths: List<String>? = null
+        folderPaths: List<String>? = null,
+        excludedPackages: Set<String>? = null
     ) {
         _uiState.update { state ->
             val cfg = state.editingConfig ?: return@update state
@@ -568,6 +572,7 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
                     operation = operation ?: cfg.operation,
                     deviceData = deviceData ?: cfg.deviceData,
                     folderPaths = folderPaths ?: cfg.folderPaths,
+                    excludedPackages = excludedPackages ?: cfg.excludedPackages,
                     updatedAt = System.currentTimeMillis()
                 )
             )
@@ -755,6 +760,10 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
                 plannable, assignments, config, caps, dryRun = true,
                 unavailableReason = reason, availableOnDisk = onDisk
             )
+            previewInputs = PreviewInputs(
+                configId = configId, isRestore = true, apps = backupApps,
+                hasRoot = hasRoot, allowPerm = allowPerm, allowSsaid = allowSsaid
+            )
             withContext(Dispatchers.Main) {
                 _uiState.update {
                     it.copy(
@@ -783,9 +792,94 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
             val reason: (BackupComponent) -> String =
                 { c -> AutomationCapability.reasonFor(c, hasRoot, allowPerm, allowSsaid) }
             val plan = BackupPlanner.plan(plannable, assignments, config, caps, dryRun = true, unavailableReason = reason)
+            previewInputs = PreviewInputs(
+                configId = configId, isRestore = false, apps = apps,
+                hasRoot = hasRoot, allowPerm = allowPerm, allowSsaid = allowSsaid
+            )
             withContext(Dispatchers.Main) {
                 _uiState.update { it.copy(previewPlan = plan, previewConfigId = configId, mode = AutoMode.PREVIEW) }
             }
+        }
+    }
+
+    /**
+     * The inputs the current preview was planned with.
+     *
+     * A switch in the preview re-plans the preview, and it must re-plan it with
+     * the SAME inputs: two sources of truth for "can this device restore
+     * permissions?" would let the plan change when you flip a switch, and a
+     * plan that moves under the user's finger is a plan nobody can trust.
+     */
+    private data class PreviewInputs(
+        val configId: String,
+        val isRestore: Boolean,
+        val apps: List<AppInfo>,
+        val hasRoot: Boolean,
+        val allowPerm: Boolean,
+        val allowSsaid: Boolean
+    )
+
+    private var previewInputs: PreviewInputs? = null
+
+    /**
+     * Include or exclude one app in the configuration on screen.
+     *
+     * The change is SAVED, not held: the runner always re-plans from the saved
+     * configuration, so an unsaved exclusion would be ignored by the run the
+     * user is about to start — and by every scheduled run of it. The preview is
+     * where a user discovers what a configuration covers, so it is where the
+     * answer belongs.
+     */
+    fun toggleConfigExclusion(packageName: String) {
+        val inputs = previewInputs
+        if (inputs == null) {
+            DroidVaultLogger.w("Automation", "toggleConfigExclusion: no preview to toggle in")
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val config = AutomationStore.listConfigs(app).find { it.id == inputs.configId }
+            if (config == null) {
+                DroidVaultLogger.w("Automation", "toggleConfigExclusion: config ${inputs.configId} not found")
+                return@launch
+            }
+            val excluded = config.excludedPackages.toMutableSet()
+            if (!excluded.remove(packageName)) excluded.add(packageName)
+            val saved = AutomationStore.saveConfig(
+                app, config.copy(excludedPackages = excluded)
+            )
+            DroidVaultLogger.i(
+                "Automation",
+                "toggleConfigExclusion ${inputs.configId} $packageName -> ${excluded.size} excluded, saved=${saved.isSuccess}"
+            )
+            if (saved.isFailure) {
+                val why = saved.exceptionOrNull()?.message ?: "could not save"
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(error = "Could not save the change: $why") }
+                }
+                return@launch
+            }
+            // The saved configuration is what the editor loads its working copy
+            // from, so the list has to be re-read: a stale copy would let the
+            // next "Save changes" write the exclusion away again.
+            refresh()
+            // Re-plan with the same inputs the preview was planned with.
+            if (inputs.isRestore) {
+                restorePreview(inputs.configId, inputs.hasRoot, inputs.allowPerm, inputs.allowSsaid)
+            } else {
+                preview(inputs.configId, inputs.apps, inputs.hasRoot, inputs.allowPerm, inputs.allowSsaid)
+            }
+        }
+    }
+
+    /** Drop every per-app exclusion from a configuration. */
+    fun clearConfigExclusions(configId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val config = AutomationStore.listConfigs(app).find { it.id == configId } ?: return@launch
+            if (config.excludedPackages.isEmpty()) return@launch
+            AutomationStore.saveConfig(app, config.copy(excludedPackages = emptySet()))
+            refresh()
         }
     }
 
@@ -849,25 +943,64 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
             backupRunInfo(config.name)
         }
         notifyAutomation(title, text, false, config.operation)
-        val execution = AutomationRunner.execute(
-            context = app,
-            config = config,
-            apps = plannable,
-            appInfos = apps,
-            trigger = trigger,
-            updateProgress = { action, step, prog ->
-                _uiState.update {
-                    it.copy(runAction = action, runStep = step, runProgress = prog)
+        // The card has to say what the run is DOING, not what it was asked to
+        // do. It used to read "Restore started" for the whole run — the field
+        // report called that an infinite notification, and it was: a shade card
+        // that never changes is indistinguishable from a run that never ends.
+        // One update per reported step, throttled: the engine reports a step
+        // per app, and a shade card rewritten once a second is a battery cost
+        // for information the user reads once a minute.
+        var lastStep = ""
+        var lastPostAt = 0L
+        var terminal = false
+        var cancelled = false
+        try {
+            val execution = AutomationRunner.execute(
+                context = app,
+                config = config,
+                apps = plannable,
+                appInfos = apps,
+                trigger = trigger,
+                updateProgress = { action, step, prog ->
+                    _uiState.update {
+                        it.copy(runAction = action, runStep = step, runProgress = prog)
+                    }
+                    if (step.isNotBlank() && step != lastStep) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastPostAt >= STEP_NOTIFICATION_THROTTLE_MS) {
+                            lastStep = step
+                            lastPostAt = now
+                            notifyAutomation(config.name, step, false, config.operation)
+                        }
+                    }
                 }
+            )
+            notifyAutomation(
+                config.name,
+                "${execution.successCount} ok, ${execution.failureCount} failed, ${execution.skippedCount} skipped",
+                true,
+                config.operation
+            )
+            terminal = true
+            return execution
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            cancelled = true
+            throw e
+        } finally {
+            // ONE terminal path. Every run that starts a card must end it:
+            // a run that dies without a verdict left the shade showing
+            // "Restore started" for a run that was over, and an ongoing card
+            // cannot be swiped away. The message says which ending it was.
+            if (!terminal) {
+                val reason = if (cancelled) {
+                    "Run cancelled"
+                } else {
+                    "Run ended without a result — see Diagnostics"
+                }
+                DroidVaultLogger.w("Automation", "run ${config.id} ended without a verdict: $reason")
+                notifyAutomation(config.name, reason, true, config.operation)
             }
-        )
-        notifyAutomation(
-            config.name,
-            "${execution.successCount} ok, ${execution.failureCount} failed, ${execution.skippedCount} skipped",
-            true,
-            config.operation
-        )
-        return execution
+        }
     }
 
     fun runConfig(configId: String, apps: List<AppInfo>) {
@@ -1353,6 +1486,16 @@ class AutomationViewModel(application: Application) : AndroidViewModel(applicati
 
     companion object {
         const val MAX_IMPORT_BYTES = 2_000_000
+
+        /**
+         * How often the ongoing notification may be rewritten with the run's
+         * current step.
+         *
+         * The engine reports a step per app, so an unthrottled card is
+         * rewritten once a second during a fast run — a battery cost for text
+         * the user reads once a minute. The terminal card is never throttled.
+         */
+        const val STEP_NOTIFICATION_THROTTLE_MS = 3_000L
 
         /** Bounded read: size pre-check + streaming cap (never unbounded readText). */
         fun readImportText(context: android.content.Context, uri: android.net.Uri): String? {

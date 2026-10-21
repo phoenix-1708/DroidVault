@@ -35,7 +35,7 @@ data class AppVerification(
      * When THIS finding was first seen, in wall-clock milliseconds; 0 when this
      * row is not a finding, or when its age is not known.
      *
-     * The usefulness of a finding depends on its age: "Messages.shift changed"
+     * The usefulness of a finding depends on its age: "Messages.vault changed"
      * read seconds after a tamper test and the same sentence a week and four runs
      * later are different facts. A finding is not withdrawn by a run, so without
      * an age the card states something that may have been repaired long ago in
@@ -168,7 +168,7 @@ data class VerificationReport(
      * 7 device data archives damaged" tells the user nothing they can act on, and
      * the pre-restore gate cannot refuse the one archive the plan actually
      * restores without knowing which item it is. Until these rows existed the
-     * device half of a verdict was counts only, so a damaged `Messages.shift`
+     * device half of a verdict was counts only, so a damaged `Messages.vault`
      * reached the restore gate as an anonymous number and the gate let it
      * through.
      */
@@ -547,7 +547,7 @@ object VerificationParser {
                 val ok = f["STATUS"].orEmpty() == "OK"
                 val change = f["HASH"].orEmpty()
                 val item = DeviceVerification(
-                    item = DeviceDataItem.entries.firstOrNull { it.archiveFile == name },
+                    item = VaultArchive.deviceItemFor(name),
                     archiveName = name,
                     ok = ok,
                     corruptParts = if (ok) emptyList() else listOf(name),
@@ -580,7 +580,7 @@ object VerificationParser {
                 val rows = if (device && report.deviceItems.isEmpty() && mismatchNames.isNotEmpty()) {
                     mismatchNames.map { name ->
                         DeviceVerification(
-                            item = DeviceDataItem.entries.firstOrNull { it.archiveFile == name },
+                            item = VaultArchive.deviceItemFor(name),
                             archiveName = name,
                             ok = true,
                             bytesReadable = 0L,

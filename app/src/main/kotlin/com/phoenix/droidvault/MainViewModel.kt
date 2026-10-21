@@ -7,7 +7,10 @@ import com.phoenix.droidvault.utils.TransferService
 import com.phoenix.droidvault.utils.TransferStatus
 import com.phoenix.droidvault.utils.VaultTransferManager
 import com.phoenix.droidvault.utils.VaultVerdictStore
+import com.phoenix.droidvault.models.VaultArchive
 import com.phoenix.droidvault.models.TransferCandidate
+import com.phoenix.droidvault.ui.theme.AccentContrast
+import com.phoenix.droidvault.ui.theme.AccentSeed
 import com.phoenix.droidvault.models.TransferProgress
 import com.phoenix.droidvault.models.ImportSource
 import com.phoenix.droidvault.models.VaultTransfer
@@ -245,7 +248,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * The archive FILE NAMES present in `Device/`, which is what the erase
-     * dialog's `Folders.shift` check and the Home card ask for.
+     * dialog's `Folders.vault` check and the Home card ask for.
      *
      * Derived, so it cannot disagree with [deviceArchives] about whether a file
      * is there. It was a separate `ls` before, and a screen reading both could
@@ -288,6 +291,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun refreshDeviceBackups() {
         viewModelScope.launch(Dispatchers.IO) {
+            // The one-time archive rename touches the very files this reads,
+            // and a rename is atomic — so a read that lands between the two
+            // names sees NEITHER and would answer "no device backups" for a
+            // phone that has them. The read waits for the rename to settle
+            // (bounded: every reader resolves both names anyway).
+            com.phoenix.droidvault.VaultExtensionMigration.awaitSettled()
             val saved = _savedPath.value
             _deviceArchives.value = try {
                 DeviceArchiveRead.Ok(DeviceManager.readDeviceArchives(saved))
@@ -370,7 +379,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Folders inside the current Folders.shift archive (manifest-based). */
+    /** Folders inside the current Folders.vault archive (manifest-based). */
     private val _archivedFolders = MutableStateFlow<List<String>>(emptyList())
     val archivedFolders: StateFlow<List<String>> = _archivedFolders.asStateFlow()
 
@@ -381,7 +390,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Real metadata of the on-disk Folders.shift archive (Manage Backups). */
+    /** Real metadata of the on-disk Folders.vault archive (Manage Backups). */
     data class FolderArchiveInfo(
         val path: String,
         val folders: List<String>,
@@ -393,7 +402,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val folderArchive: StateFlow<FolderArchiveInfo?> = _folderArchive.asStateFlow()
 
     /**
-     * Discover the Folders.shift archive through the root shell (scoped
+     * Discover the Folders.vault archive through the root shell (scoped
      * storage hides it from java.io): existence, size, mtime, and the real
      * folder list from the manifest inside it. Powers the Manage Backups
      * folder card — actual indexed backup content, not a placeholder.
@@ -401,10 +410,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshFolderArchive() {
         viewModelScope.launch(Dispatchers.IO) {
             val path = _savedPath.value
-            val archive = "$path/Device/${com.phoenix.droidvault.utils.BackupConfigFolders.ARCHIVE_FILE}"
-            val exists = Shell.cmd("[ -f ${ShellQuote.q(archive)} ] && echo y").exec()
-                .out.firstOrNull()?.trim() == "y"
-            if (!exists) {
+            // Resolved: the Folders archive under the name it actually has.
+            val archive = com.phoenix.droidvault.utils.DeviceManager.resolveDeviceArchive(
+                "$path/Device",
+                com.phoenix.droidvault.models.DeviceDataItem.FOLDERS.archiveBase
+            )
+            if (archive == null) {
                 _folderArchive.value = null
                 return@launch
             }
@@ -522,13 +533,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Backed-up Folders Management (Manage Backups): remove the given folders
-     * from the on-disk Folders.shift archive by rebuilding it without them.
+     * from the on-disk Folders.vault archive by rebuilding it without them.
      * The remaining archive is all-or-nothing — a folder is removed whole.
      * Refreshes the folder-archive card and the available-backup set after.
      */
     fun deleteArchivedFolders(context: Context, removePaths: List<String>) {
         viewModelScope.launch(Dispatchers.IO) {
-            // Rebuilding Folders.shift rewrites the archive a restore may be
+            // Rebuilding Folders.vault rewrites the archive a restore may be
             // streaming right now — the same shared-state hazard the run gate
             // covers for device backups. Refuse rather than corrupt it.
             // Acquire rather than merely check, for the same reason as
@@ -627,6 +638,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setDynamicColor(enabled: Boolean) {
         _dynamicColor.value = enabled
         prefs.edit { putBoolean("dynamic_color", enabled) }
+    }
+
+    /**
+     * The accent the user chose, or the app's own plum.
+     *
+     * `accent_seed` holds the chosen colour; 0 means "the app's own". The
+     * contrast step is separate, because "I want a different colour" and "I
+     * want it quieter" are two different wishes.
+     */
+    private val _accent = MutableStateFlow(readAccent())
+    val accent: StateFlow<AccentSeed> = _accent.asStateFlow()
+
+    private fun readAccent(): AccentSeed {
+        val argb = prefs.getInt("accent_seed", 0)
+        val contrast = AccentContrast.entries
+            .getOrElse(prefs.getInt("accent_contrast", AccentContrast.STANDARD.ordinal)) {
+                AccentContrast.STANDARD
+            }
+        return if (argb == 0) AccentSeed.Plum.copy(contrast = contrast) else AccentSeed(argb, contrast)
+    }
+
+    /** The user picked a colour. */
+    fun setAccent(argb: Int) {
+        val seed = AccentSeed(argb, _accent.value.contrast)
+        _accent.value = seed
+        prefs.edit { putInt("accent_seed", argb) }
+    }
+
+    /** The user picked a contrast step. */
+    fun setAccentContrast(contrast: AccentContrast) {
+        val seed = _accent.value.copy(contrast = contrast)
+        _accent.value = seed
+        prefs.edit { putInt("accent_contrast", contrast.ordinal) }
+    }
+
+    /** Back to the app's own plum. */
+    fun resetAccent() {
+        _accent.value = AccentSeed.Plum.copy(contrast = _accent.value.contrast)
+        prefs.edit { putInt("accent_seed", 0) }
     }
 
     // Shell order: Home, Flash, Migrate, Tools, Auto.
@@ -2458,7 +2508,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Deleting one mid-run (a scheduled restore is streaming it) is a
             // shared-state hazard the run gate exists for — refuse instead.
             // ACQUIRE, not merely read. This used to check `isBusy` and then run
-            // anyway, so a scheduled restore could start streaming Messages.shift
+            // anyway, so a scheduled restore could start streaming Messages.vault
             // between the check and the `mv` — and, worse, two deletes could be
             // inside moveToTrash at once, each reading the trash index before the
             // other wrote it. The second writer then saved a manifest missing the
@@ -2478,11 +2528,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // The gate is held from here until the `finally` below, so the
             // read-modify-write of the trash index inside moveToTrash cannot race
             // a second delete or a run that is streaming one of these archives.
-            val allowed = setOf(
-                "Messages.shift", "CallLogs.shift", "Contacts.shift",
-                "Wi-Fi.shift", "Wallpaper.shift", "Bluetooth.shift",
-                BackupConfigFolders.ARCHIVE_FILE
-            )
+            // The device archives, by the name they actually have on disk: an
+            // archive written before the extension moved is still this item's
+            // archive, and the trash has to move the file that is THERE.
+            val present = _deviceArchives.value
+                .archivesOrEmpty()
+                .filter { it.present }
+                .associate { it.item to it.fileName }
+            // The names an erase may move: both spellings of every device
+            // item's archive, from the model's own table. A hard-coded list
+            // here would refuse a move of an archive that is there under the
+            // other name — and the refusal would read as "nothing to delete".
+            val allowed = com.phoenix.droidvault.models.DeviceDataItem.entries
+                .flatMap { VaultArchive.names(it.archiveBase) }
+                .toSet()
             // MOVED, not erased — the same rule as app archives (invariant 11).
             // A device archive is often the ONLY copy: an SMS backed up months
             // ago and since deleted on the phone cannot be re-derived from the
@@ -2493,13 +2552,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 require(file in allowed) { "Invalid target" }
                 if (selected) targets += "$path/Device/$file"
             }
-            want("Messages.shift", doSms)
-            want("CallLogs.shift", doCall)
-            want("Contacts.shift", doContacts)
-            want("Wi-Fi.shift", doWifi)
-            want("Wallpaper.shift", doWallpaper)
-            want("Bluetooth.shift", doBluetooth)
-            want(BackupConfigFolders.ARCHIVE_FILE, doFolders)
+            // The file that is on disk — the new name if the migration has
+            // run, the old one if it has not.
+            fun deviceFile(item: com.phoenix.droidvault.models.DeviceDataItem): String =
+                present[item] ?: VaultArchive.deviceName(item)
+
+            want(deviceFile(com.phoenix.droidvault.models.DeviceDataItem.MESSAGES), doSms)
+            want(deviceFile(com.phoenix.droidvault.models.DeviceDataItem.CALLS), doCall)
+            want(deviceFile(com.phoenix.droidvault.models.DeviceDataItem.CONTACTS), doContacts)
+            want(deviceFile(com.phoenix.droidvault.models.DeviceDataItem.WIFI), doWifi)
+            want(deviceFile(com.phoenix.droidvault.models.DeviceDataItem.WALLPAPER), doWallpaper)
+            want(deviceFile(com.phoenix.droidvault.models.DeviceDataItem.BLUETOOTH), doBluetooth)
+            want(deviceFile(com.phoenix.droidvault.models.DeviceDataItem.FOLDERS), doFolders)
 
             // Declared OUTSIDE the try so the summary below can report on what
             // actually moved, whether or not the body threw.
@@ -4402,8 +4466,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // Check the apps AND the device data in one go.
             //
             // Both entry points called this with the default deviceData = false,
-            // so the engine only ever ran --verify-apps and Messages.shift,
-            // CallLogs.shift and Folders.shift were never read. For a user whose
+            // so the engine only ever ran --verify-apps and Messages.vault,
+            // CallLogs.vault and Folders.vault were never read. For a user whose
             // only backup IS their messages — a very ordinary situation — the one
             // button that says "check my backups" silently checked nothing, and
             // then the Home row was suppressed entirely because the app count was
@@ -4850,7 +4914,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     // is managing what is on the phone.
                     refreshTransfers()
                     // Same for the device archives the Device data card lists.
-                    // A batch restored from the trash can put a `Messages.shift`
+                    // A batch restored from the trash can put a `Messages.vault`
                     // back, and this is the read that would notice (§2.71 — write
                     // the refresh rule against the write, not against the list
                     // that happened to be on screen).

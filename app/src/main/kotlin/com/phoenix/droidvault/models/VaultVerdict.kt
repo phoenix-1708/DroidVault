@@ -175,7 +175,7 @@ object VaultVerdict {
                 // put a name on the card that no plan can act on.
                 if (archive.isEmpty()) continue
                 device += DeviceVerification(
-                    item = DeviceDataItem.entries.firstOrNull { it.archiveFile == archive },
+                    item = VaultArchive.deviceItemFor(archive),
                     archiveName = archive,
                     ok = row.optBoolean(K_ITEM_OK, false),
                     corruptParts = strings(row.optJSONArray(K_CORRUPT_PARTS)),

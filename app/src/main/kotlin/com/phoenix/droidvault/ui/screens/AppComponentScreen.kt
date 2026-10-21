@@ -54,6 +54,7 @@ import com.phoenix.droidvault.models.AppInfo
 import com.phoenix.droidvault.models.AppParts
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.ui.theme.DvMotion
+import com.phoenix.droidvault.ui.components.DvButton
 
 private fun compIcon(id: Int): ImageVector = when (id) {
     AppParts.APP -> Icons.Default.Android
@@ -268,7 +269,7 @@ fun AppComponentScreen(
                         )
                     }
                     Spacer(Modifier.width(12.dp))
-                    androidx.compose.material3.Button(
+                    DvButton(
                         onClick = onBack,
                         shape = CircleShape,
                         modifier = Modifier.height(48.dp)

@@ -21,7 +21,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.SecurityUpdateGood
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -36,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.phoenix.droidvault.MainViewModel
+import com.phoenix.droidvault.ui.components.DvButton
 import com.phoenix.droidvault.ui.components.PickedImportSheet
 import com.phoenix.droidvault.models.AppInfo
 import com.phoenix.droidvault.models.AppState
@@ -78,7 +78,7 @@ fun ToolsTab(appState: AppState, appList: List<AppInfo>, viewModel: MainViewMode
                 )
             },
             confirmButton = {
-                Button(onClick = { showMetaWarningDialog = false }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
+                DvButton(onClick = { showMetaWarningDialog = false }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError)) {
                     Text("OK")
                 }
             },

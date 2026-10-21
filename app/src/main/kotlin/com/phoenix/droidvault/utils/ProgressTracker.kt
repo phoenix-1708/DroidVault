@@ -493,7 +493,7 @@ object ProgressTracker {
      * While a run is active, poll the CURRENT app's candidates and translate
      * on-disk growth into RUNNING-part fill 1..99.
      *
-     * Backup watches the growing .shift outputs; RESTORE watches the
+     * Backup watches the growing archive outputs; RESTORE watches the
      * extraction target dirs under /data (added for progress parity — a
      * 15 GB extraction used to sit on a motionless spinner while backup at
      * least had engine part events).

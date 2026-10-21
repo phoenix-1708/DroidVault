@@ -57,6 +57,32 @@ class AutomationCodecTest {
         assertEquals(CONFIG_LIST_ORDER_DEFAULT, AutomationCodec.configFrom(o).listOrder)
     }
 
+    @Test fun configExcludedPackagesRoundTrip() {
+        val c = BackupConfig(
+            id = "cx", name = "With exclusions",
+            excludedPackages = setOf("com.example.one", "com.example.two")
+        )
+        val back = AutomationCodec.configFrom(AutomationCodec.configTo(c))
+        assertEquals(c.excludedPackages, back.excludedPackages)
+    }
+
+    @Test fun configExcludedPackagesDefaultWhenAbsent() {
+        // A configuration written before the field existed has none, and that is
+        // the right reading: nothing was excluded. A missing key must not make
+        // the whole configuration unreadable.
+        val o = JSONObject().put("id", "c").put("name", "n")
+        assertEquals(emptySet<String>(), AutomationCodec.configFrom(o).excludedPackages)
+    }
+
+    @Test fun configExcludedPackagesDropBlankEntries() {
+        val o = JSONObject().put("id", "c").put("name", "n")
+            .put("excludedPackages", org.json.JSONArray(listOf("com.a", "", "   ", "com.b")))
+        assertEquals(
+            setOf("com.a", "com.b"),
+            AutomationCodec.configFrom(o).excludedPackages
+        )
+    }
+
     @Test fun reorderSwapsWithinOperationOnly() {
         val b1 = BackupConfig(id = "b1", name = "Alpha", operation = ConfigOperation.BACKUP)
         val b2 = BackupConfig(id = "b2", name = "Beta", operation = ConfigOperation.BACKUP)

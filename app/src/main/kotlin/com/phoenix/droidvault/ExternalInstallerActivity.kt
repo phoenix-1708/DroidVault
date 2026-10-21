@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentWidth
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -33,6 +32,7 @@ import com.phoenix.droidvault.ui.components.AppInstallerBody
 import com.phoenix.droidvault.ui.components.AppInstallerHeader
 import com.phoenix.droidvault.ui.components.BatchInstallerBody
 import com.phoenix.droidvault.ui.components.BatchInstallerHeader
+import com.phoenix.droidvault.ui.components.DvButton
 import com.phoenix.droidvault.ui.theme.DroidVaultTheme
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
@@ -54,9 +54,10 @@ class ExternalInstallerActivity : ComponentActivity() {
         setContent {
             val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
             val dynamicColor by viewModel.dynamicColor.collectAsStateWithLifecycle()
+            val accent by viewModel.accent.collectAsStateWithLifecycle()
             val appState by viewModel.uiState.collectAsStateWithLifecycle()
 
-            DroidVaultTheme(themeMode = themeMode, dynamicColor = dynamicColor) {
+            DroidVaultTheme(themeMode = themeMode, dynamicColor = dynamicColor, accent = accent) {
                 androidx.compose.runtime.LaunchedEffect(
                     appState.showAppInstaller,
                     appState.batchInstallApps
@@ -94,7 +95,7 @@ class ExternalInstallerActivity : ComponentActivity() {
                                     }
                                     if (app.isAnalysisComplete) {
                                         Spacer(Modifier.width(8.dp))
-                                        Button(onClick = { viewModel.executeBatchInstall() }) {
+                                        DvButton(onClick = { viewModel.executeBatchInstall() }) {
                                             Text(getButtonText(app))
                                         }
                                     }
@@ -129,14 +130,14 @@ class ExternalInstallerActivity : ComponentActivity() {
                                             Text("Cancel")
                                         }
                                         Spacer(Modifier.width(8.dp))
-                                        Button(
+                                        DvButton(
                                             onClick = { viewModel.executeBatchInstall() },
                                             enabled = selectedCount > 0
                                         ) {
                                             Text("Install Selected ($selectedCount)")
                                         }
                                     } else if (appState.totalInstallTimeSeconds > 0L) {
-                                        Button(onClick = { viewModel.closeAppInstaller { finish() } }) {
+                                        DvButton(onClick = { viewModel.closeAppInstaller { finish() } }) {
                                             Text("Close")
                                         }
                                     }

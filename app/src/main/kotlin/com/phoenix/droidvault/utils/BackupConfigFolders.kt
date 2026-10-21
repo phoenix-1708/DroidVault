@@ -6,15 +6,21 @@ import org.json.JSONObject
 /**
  * Helpers for [com.phoenix.droidvault.models.DeviceDataItem.FOLDERS]:
  * validation of user-picked absolute paths and the manifest that travels
- * inside every Folders.shift archive so a restore can put each folder back
+ * inside every Folders.vault archive so a restore can put each folder back
  * to its exact original location.
  *
  * Kept free of Android dependencies so the logic is unit-testable.
  */
 object BackupConfigFolders {
 
-    /** Folders.shift archive file name inside `<savedPath>/Device/`. */
-    const val ARCHIVE_FILE = "Folders.shift"
+    /**
+     * The Folders archive file name inside `<savedPath>/Device/`.
+     *
+     * The name an archive is WRITTEN as. One written before the extension
+     * moved is still the Folders archive, and it is found by
+     * [com.phoenix.droidvault.models.VaultArchive.existing].
+     */
+    const val ARCHIVE_FILE = "Folders.vault"
 
     /** Manifest entry name inside the tar. */
     const val MANIFEST_NAME = "folders_manifest.json"

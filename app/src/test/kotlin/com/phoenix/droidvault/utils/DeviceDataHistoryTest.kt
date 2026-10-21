@@ -37,9 +37,9 @@ class DeviceDataHistoryTest {
             errorSummary = "no device-data backups found in the backup folder"
         )
         val files = mapOf(
-            DeviceDataItem.MESSAGES to "Messages.shift",
-            DeviceDataItem.CALLS to "CallLogs.shift",
-            DeviceDataItem.CONTACTS to "Contacts.shift"
+            DeviceDataItem.MESSAGES to "Messages.vault",
+            DeviceDataItem.CALLS to "CallLogs.vault",
+            DeviceDataItem.CONTACTS to "Contacts.vault"
         )
         files.forEach { (item, file) -> execution.apps.add(skippedItem(item, file)) }
         execution.finishedAt = System.currentTimeMillis()
@@ -74,13 +74,13 @@ class DeviceDataHistoryTest {
                 result = ResultState.SUCCESS, deviceItem = DeviceDataItem.MESSAGES
             )
         )
-        execution.apps.add(skippedItem(DeviceDataItem.WIFI, "Wi-Fi.shift"))
+        execution.apps.add(skippedItem(DeviceDataItem.WIFI, "Wi-Fi.vault"))
         execution.finishedAt = System.currentTimeMillis()
 
         assertEquals(1, execution.successCount)
         assertEquals(1, execution.skippedCount)
         assertEquals(ResultState.SKIPPED, execution.apps.last().result)
-        assertTrue(execution.apps.last().reason.contains("Wi-Fi.shift"))
+        assertTrue(execution.apps.last().reason.contains("Wi-Fi.vault"))
     }
 
     @Test fun deviceRecordsRoundTripThroughCodec() {
@@ -89,13 +89,13 @@ class DeviceDataHistoryTest {
             id = "e3", configId = "c1", configName = "Device Restore",
             trigger = TriggerType.SCHEDULED, operation = ConfigOperation.RESTORE
         )
-        execution.apps.add(skippedItem(DeviceDataItem.WALLPAPER, "Wallpaper.shift"))
+        execution.apps.add(skippedItem(DeviceDataItem.WALLPAPER, "Wallpaper.vault"))
         val json = com.phoenix.droidvault.utils.AutomationCodec.appRecordsTo(execution.apps)
         val back = com.phoenix.droidvault.utils.AutomationCodec.appRecordsFrom(json)
         assertEquals(1, back.size)
         assertEquals(DeviceDataItem.WALLPAPER, back.single().deviceItem)
         assertEquals(ResultState.SKIPPED, back.single().result)
-        assertTrue(back.single().reason.contains("Wallpaper.shift"))
+        assertTrue(back.single().reason.contains("Wallpaper.vault"))
     }
 
     @Test fun pipelineFailureRecordsFailedNotSuccess() {
@@ -125,12 +125,12 @@ class DeviceDataHistoryTest {
 
     @Test fun archiveFilenamesCoverEveryDeviceItem() {
         // The skip reasons are only honest if the checked names are the real ones.
-        assertEquals("Messages.shift", AutomationRunner.deviceBackupFileFor(DeviceDataItem.MESSAGES))
-        assertEquals("CallLogs.shift", AutomationRunner.deviceBackupFileFor(DeviceDataItem.CALLS))
-        assertEquals("Contacts.shift", AutomationRunner.deviceBackupFileFor(DeviceDataItem.CONTACTS))
-        assertEquals("Wi-Fi.shift", AutomationRunner.deviceBackupFileFor(DeviceDataItem.WIFI))
-        assertEquals("Wallpaper.shift", AutomationRunner.deviceBackupFileFor(DeviceDataItem.WALLPAPER))
-        assertEquals("Bluetooth.shift", AutomationRunner.deviceBackupFileFor(DeviceDataItem.BLUETOOTH))
+        assertEquals("Messages.vault", AutomationRunner.deviceBackupFileFor(DeviceDataItem.MESSAGES))
+        assertEquals("CallLogs.vault", AutomationRunner.deviceBackupFileFor(DeviceDataItem.CALLS))
+        assertEquals("Contacts.vault", AutomationRunner.deviceBackupFileFor(DeviceDataItem.CONTACTS))
+        assertEquals("Wi-Fi.vault", AutomationRunner.deviceBackupFileFor(DeviceDataItem.WIFI))
+        assertEquals("Wallpaper.vault", AutomationRunner.deviceBackupFileFor(DeviceDataItem.WALLPAPER))
+        assertEquals("Bluetooth.vault", AutomationRunner.deviceBackupFileFor(DeviceDataItem.BLUETOOTH))
     }
 
     @Test fun theArchiveNameHasOneSpellingPerItem() {
@@ -148,8 +148,8 @@ class DeviceDataHistoryTest {
                 item.archiveFile
             )
             assertTrue(
-                "$item names a .shift archive, which is what the verifier walks",
-                item.archiveFile.endsWith(".shift")
+                "$item names a .vault archive, which is what the verifier walks",
+                item.archiveFile.endsWith(".vault")
             )
         }
         assertEquals(BackupConfigFolders.ARCHIVE_FILE, DeviceDataItem.FOLDERS.archiveFile)

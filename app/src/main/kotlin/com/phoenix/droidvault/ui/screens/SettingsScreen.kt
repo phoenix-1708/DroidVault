@@ -32,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
@@ -45,7 +46,7 @@ import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -80,11 +81,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.phoenix.droidvault.MainViewModel
+import com.phoenix.droidvault.ui.components.DvButton
 import com.phoenix.droidvault.ui.components.DvIconBadge
 import com.phoenix.droidvault.models.AppParts
 import com.phoenix.droidvault.models.DiagLog
 import com.phoenix.droidvault.ui.theme.DvMotion
+import com.phoenix.droidvault.ui.theme.AccentSeed
 import com.phoenix.droidvault.ui.theme.DvRole
+import com.phoenix.droidvault.ui.theme.accentColor
+import com.phoenix.droidvault.ui.theme.hex
 import com.phoenix.droidvault.ui.theme.DvShapes
 import com.phoenix.droidvault.ui.theme.dvAccent
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -125,7 +130,9 @@ private fun ConsentRow(
 fun SettingsTab(
     context: Context,
     viewModel: MainViewModel,
-    onOpenAbout: () -> Unit = {}
+    onOpenAbout: () -> Unit = {},
+    /** The accent picker is a SIBLING of Settings, so the app bar owns the way back. */
+    onOpenAccentPicker: () -> Unit = {}
 ) {
     val savedPath by viewModel.savedPath.collectAsStateWithLifecycle()
     val currentTheme by viewModel.themeMode.collectAsStateWithLifecycle()
@@ -174,6 +181,8 @@ fun SettingsTab(
     // Saveable: the theme picker recreates the Activity when applying a mode,
     // and a plain remember closed the sheet mid-selection.
     var showThemeSheet by rememberSaveable { mutableStateOf(false) }
+    val accent by viewModel.accent.collectAsStateWithLifecycle()
+
 
     // --- Diagnostics logger: state + live ticker. The ticker refreshes the
     // status line every 500ms and, while the live-view sheet is open, the
@@ -228,8 +237,9 @@ fun SettingsTab(
         }
     }
 
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
+    val launcher =
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val uri = result.data?.data ?: return@rememberLauncherForActivityResult
             // Platform types: null for a malformed tree URI / no external volume.
             // See MainScreen's copy of this callback for the full note.
             val docId = android.provider.DocumentsContract.getTreeDocumentId(uri) ?: return@rememberLauncherForActivityResult
@@ -251,13 +261,12 @@ fun SettingsTab(
                 viewModel.migrateFolder(finalPath) { isMoving = false }
             }
         }
-    }
 
     if (showMoveWarning != null) {
         AlertDialog(
             onDismissRequest = { showMoveWarning = null },
             confirmButton = {
-                Button(
+                DvButton(
                     onClick = {
                         val path = showMoveWarning!!
                         showMoveWarning = null
@@ -315,6 +324,55 @@ fun SettingsTab(
                         Text(label, style = MaterialTheme.typography.titleMedium, color = if (currentTheme == value) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                         if (currentTheme == value) Icon(Icons.Default.Check, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary)
                     }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // The user's own colour. It comes BEFORE the wallpaper
+                // switch, because it wins: choosing a colour turns the
+                // wallpaper off, and the row says so.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(20.dp))
+                        .clickable {
+                            showThemeSheet = false
+                            onOpenAccentPicker()
+                        }
+                        .padding(vertical = 12.dp, horizontal = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Accent colour",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            if (accent == AccentSeed.Plum) {
+                                "Droid Vault's own plum"
+                            } else {
+                                "Your colour — ${accent.hex()}"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (accent == AccentSeed.Plum) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    accent.accentColor(isDark = currentTheme != 1)
+                                }
+                            )
+                    )
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -396,7 +454,7 @@ fun SettingsTab(
                             Spacer(modifier = Modifier.height(2.dp))
                             Text("All backups and files are saved here", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        IconButton(onClick = { if (!isMoving) launcher.launch(null) }) { Icon(Icons.Default.FolderOpen, contentDescription = "Browse", modifier = Modifier.size(28.dp)) }
+                        IconButton(onClick = { if (!isMoving) launcher.launch(com.phoenix.droidvault.utils.VaultFolderPicker.intent(context, savedPath)) }) { Icon(Icons.Default.FolderOpen, contentDescription = "Browse", modifier = Modifier.size(28.dp)) }
                     }
                     Spacer(modifier = Modifier.height(20.dp))
                     OutlinedTextField(
@@ -427,7 +485,7 @@ fun SettingsTab(
                                     Text("Saving Directory...", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.primary)
                                 }
                             } else {
-                                Button(
+                                DvButton(
                                     onClick = {
                                         val basePath =
                                             android.os.Environment.getExternalStorageDirectory().absolutePath
@@ -549,10 +607,15 @@ fun SettingsTab(
                         title = { Text("Remove folder from backups?") },
                         text = { Text("$folderPendingDelete will no longer be packed into Device Data backups. Files on the device are not touched.") },
                         confirmButton = {
-                            Button(onClick = {
+                            DvButton(onClick = {
                                 folderPendingDelete?.let { viewModel.removeBackupFolder(it) }
                                 folderPendingDelete = null
-                            }) { Text("Remove") }
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    )
+                        ) { Text("Remove") }
                         },
                         dismissButton = {
                             OutlinedButton(onClick = { folderPendingDelete = null }) { Text("Cancel") }
@@ -919,7 +982,7 @@ fun SettingsTab(
                     AlertDialog(
                         onDismissRequest = { pendingConsent = null },
                         confirmButton = {
-                            Button(onClick = { pendingConsent!!.third(true); pendingConsent = null }) { Text("Enable") }
+                            DvButton(onClick = { pendingConsent!!.third(true); pendingConsent = null }) { Text("Enable") }
                         },
                         dismissButton = {
                             OutlinedButton(onClick = { pendingConsent = null }) { Text("Cancel") }

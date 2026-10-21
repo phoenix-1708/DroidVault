@@ -2,9 +2,8 @@ package com.phoenix.droidvault
 
 import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
-import com.phoenix.droidvault.ui.theme.AmoledAccentColorScheme
-import com.phoenix.droidvault.ui.theme.DarkColorScheme
-import com.phoenix.droidvault.ui.theme.LightColorScheme
+import com.phoenix.droidvault.ui.theme.AccentSeed
+import com.phoenix.droidvault.ui.theme.accentColorScheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -114,10 +113,13 @@ class ColorSchemeRoleDistinctnessTest {
         )
     }
 
-    /** The hand-written AMOLED scheme, which is the app's dark default. */
+    /** The AMOLED scheme, which is the app's dark default. */
     @Test
     fun amoledSchemeRolesAreDistinct() {
-        assertDistinct(AmoledAccentColorScheme, "AmoledAccentColorScheme")
+        assertDistinct(
+            accentColorScheme(AccentSeed.Plum, isDark = true, isAmoled = true),
+            "Amoled"
+        )
     }
 
     /** The light scheme. It carried the identical defect: `primaryContainer`,
@@ -125,13 +127,19 @@ class ColorSchemeRoleDistinctnessTest {
      *  value, so light-mode containers resolved to `onPrimaryContainer` too. */
     @Test
     fun lightSchemeRolesAreDistinct() {
-        assertDistinct(LightColorScheme, "LightColorScheme")
+        assertDistinct(
+            accentColorScheme(AccentSeed.Plum, isDark = false, isAmoled = false),
+            "Light"
+        )
     }
 
     /** The app's default dark scheme — `theme_mode` defaults to 0, which is this. */
     @Test
     fun darkSchemeRolesAreDistinct() {
-        assertDistinct(DarkColorScheme, "DarkColorScheme")
+        assertDistinct(
+            accentColorScheme(AccentSeed.Plum, isDark = true, isAmoled = false),
+            "Dark"
+        )
     }
 
     /**
@@ -142,9 +150,9 @@ class ColorSchemeRoleDistinctnessTest {
     @Test
     fun aSurfaceContainerResolvesToOnSurfaceNotTheAccent() {
         for ((label, scheme) in listOf(
-            "AmoledAccentColorScheme" to AmoledAccentColorScheme,
-            "DarkColorScheme" to DarkColorScheme,
-            "LightColorScheme" to LightColorScheme
+            "Amoled" to accentColorScheme(AccentSeed.Plum, isDark = true, isAmoled = true),
+            "Dark" to accentColorScheme(AccentSeed.Plum, isDark = true, isAmoled = false),
+            "Light" to accentColorScheme(AccentSeed.Plum, isDark = false, isAmoled = false)
         )) {
             for (role in listOf("surfaceContainerLowest", "surfaceContainerLow", "surfaceContainer",
                     "surfaceContainerHigh", "surfaceContainerHighest")) {

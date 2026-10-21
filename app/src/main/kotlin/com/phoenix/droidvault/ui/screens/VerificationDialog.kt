@@ -247,7 +247,7 @@ fun VerificationDialog(
                                     }
                                 }
                                 // The device half, one row per archive the run read.
-                                // Without these a damaged Messages.shift reached this
+                                // Without these a damaged Messages.vault reached this
                                 // dialog as part of a count with nothing to tap: the
                                 // summary said "1 of 7 damaged" and no row named it,
                                 // which is the one thing the detail view exists for.

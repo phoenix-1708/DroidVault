@@ -6,7 +6,6 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 
 /**
  * Semantic accent roles.
@@ -28,6 +27,19 @@ import androidx.compose.ui.graphics.luminance
  * Status roles (Success / Warning / Error / Info) deliberately reuse the same
  * hue family as their functional counterpart: an "Auto enabled" check and a
  * "backup finished" check are the same visual event to a user.
+ *
+ * **Three of these hues are still in the blue band** (Backup 214, Migrate 190,
+ * Info 205) after the accent left blue, and that was a decision rather than
+ * an oversight: every assignment that moves all three out of blue was
+ * searched, and the best one drops the **minimum separation on the Home grid
+ * from 48° to 22°** — the six role badges that screen shows at once would
+ * crowd, and the colour stops carrying meaning. The hues are kept and the
+ * CHROMA came down instead (see [DvPalette]), so a blue role reads as a
+ * muted steel-blue rather than as the loud blue the app used to be built on.
+ *
+ * **These are the BASE hues.** A user-chosen accent rotates the family —
+ * see [roleHues] — and the two that carry a meaning (Destructive rose, Error
+ * red) never move.
  */
 enum class DvRole(val hue: Float) {
     /** Creating a backup: apps, partitions, folders, device data. */
@@ -66,55 +78,53 @@ enum class DvRole(val hue: Float) {
 /**
  * A themed set of semantic accents.
  *
- * Colours are generated from each role's hue with fixed saturation/lightness
- * constants rather than being hand-picked per role, which is what guarantees
- * the contrast floor: every role gets the same measured relationships instead
- * of some hues being quietly unreadable. `AccentContrastTest` asserts them.
+ * The colours come from **tonal palettes** — one hue, one chroma, thirteen
+ * perceptual tones — rather than from the HSL arithmetic this file used
+ * before. The reason is measured, not aesthetic: HSL's lightness is not
+ * perceptually uniform, so the same HSL lightness is a very different
+ * brightness at different hues, and a palette generated that way is
+ * unreadable at the ends of the wheel. A TONE is a perceptual lightness, so
+ * the same tone has the same contrast against the same surface at every hue
+ * — which is what lets a user choose any colour and still get a legible app.
  *
- *   light: accent on container 5.6:1, container on surface 1.2:1, accent on surface 6.8:1
- *   dark:  accent on container 5.4:1, container on surface 1.3:1, accent on surface 6.8:1
+ * The constants are the app's own values, expressed as tones: the dark
+ * accent sits at tone 70, its container at 24; the light accent at tone 40
+ * and its container at 88. `AccentContrastTest` asserts the pairings against
+ * the card tones they actually sit on.
  */
 @Immutable
 class DvPalette(
-    private val accentSaturation: Float,
-    private val accentLightness: Float,
-    private val containerSaturation: Float,
-    private val containerLightness: Float
+    private val hueFor: (DvRole) -> Double,
+    private val chroma: Double,
+    private val accentTone: Int,
+    private val containerTone: Int,
+    private val containerChromaScale: Double
 ) {
     /** The saturated role colour. Use for icons on a container, and for accent text. */
     fun accent(role: DvRole): Color =
-        Color.hsl(role.hue, accentSaturation, accentLightness)
+        Color(rolePalette(hueFor(role), chroma).tone(accentTone))
 
     /** A tinted block that carries [accent] and separates from ordinary surfaces. */
     fun container(role: DvRole): Color =
-        Color.hsl(role.hue, containerSaturation, containerLightness)
+        Color(rolePalette(hueFor(role), chroma * containerChromaScale).tone(containerTone))
 
     /** Colour for text/icons sitting on [container]. */
     fun onContainer(role: DvRole): Color = accent(role)
 }
 
 /**
- * Light-theme accents.
+ * The role palette for the app's own accent.
  *
- * Containers sit at L=0.84 rather than the very pale 0.90-0.94 that the old
- * `primary.copy(alpha = 0.15f)` produced. That alpha tint over a near-white
- * surface collapsed to ~1.05:1, so in light mode the About-page capability
- * chips and every MenuCard badge were effectively invisible.
+ * The palette the app ships with is [rolePaletteFor] over the plum seed and
+ * the base role hues; this is the same thing, spelled out for the tests and
+ * for anything that needs the app's own palette without a seed.
  */
-val LightDvPalette = DvPalette(
-    accentSaturation = 0.60f,
-    accentLightness = 0.25f,
-    containerSaturation = 0.55f,
-    containerLightness = 0.84f
-)
+val LightDvPalette: DvPalette
+    get() = rolePaletteFor(AccentSeed.Plum, isDark = false, roleHues(AccentSeed.Plum.hue))
 
 /** Dark-theme accents, including AMOLED (same values; surfaces are darker, so the step is larger). */
-val DarkDvPalette = DvPalette(
-    accentSaturation = 0.70f,
-    accentLightness = 0.76f,
-    containerSaturation = 0.40f,
-    containerLightness = 0.25f
-)
+val DarkDvPalette: DvPalette
+    get() = rolePaletteFor(AccentSeed.Plum, isDark = true, roleHues(AccentSeed.Plum.hue))
 
 val LocalDvPalette = staticCompositionLocalOf { DarkDvPalette }
 
@@ -127,19 +137,3 @@ fun dvAccent(role: DvRole): Color = LocalDvPalette.current.accent(role)
 @Composable
 @ReadOnlyComposable
 fun dvContainer(role: DvRole): Color = LocalDvPalette.current.container(role)
-
-/**
- * Resolve the accent palette for the scheme that is actually in effect.
- *
- * Luminance of `background` is used rather than the stored `themeMode` int so
- * this stays correct for all five modes (system / light / dark / AMOLED /
- * AMOLED+accent) AND for Android 12+ dynamic (Monet) colour, which Droid Vault
- * enables by default. The accents themselves stay fixed by design: they are the
- * product's identity, and keeping them independent of the wallpaper seed is what
- * stops the UI from collapsing back to one wallpaper-derived hue.
- */
-@Composable
-@ReadOnlyComposable
-fun dvPaletteFor(scheme: androidx.compose.material3.ColorScheme): DvPalette =
-    if (scheme.background.luminance() < 0.5f) DarkDvPalette else LightDvPalette
-

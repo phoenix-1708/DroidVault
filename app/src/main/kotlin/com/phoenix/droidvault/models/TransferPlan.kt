@@ -120,7 +120,7 @@ object TransferPlan {
     /**
      * The KB an import will expand to.
      *
-     * A `.shift` transfer is an uncompressed tar (invariant 29: a plain tar's
+     * A `.vault` transfer is an uncompressed tar (invariant 29: a plain tar's
      * uncompressed size is its file size to within block padding), so the file
      * size is the expansion. A 0 here means not measured — the gate re-derives
      * it for real.

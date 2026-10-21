@@ -11,6 +11,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -51,10 +52,22 @@ object DvSpacing {
     val section = 32.dp
 }
 
+/**
+ * The app's theme.
+ *
+ * **The accent seed is the user's choice, and it wins.** A seed that is not
+ * the app's own plum replaces the scheme entirely: the app's colours come
+ * from the tonal palettes the seed generates, and the neutrals stay the
+ * app's own warm greys.
+ *
+ * The order of precedence is: the user's accent, then the wallpaper (dynamic
+ * colour), then the app's own plum.
+ */
 @Composable
 fun DroidVaultTheme(
     themeMode: Int = 0,
     dynamicColor: Boolean = true,
+    accent: AccentSeed = AccentSeed.Plum,
     content: @Composable () -> Unit
 ) {
     val systemDark = isSystemInDarkTheme()
@@ -73,8 +86,21 @@ fun DroidVaultTheme(
         return null
     }
 
-    val colorScheme = when (themeMode) {
-        0 -> {
+    val isDark = when (themeMode) {
+        1 -> false
+        2, 3, 4 -> true
+        else -> systemDark
+    }
+    val isAmoled = themeMode == 3 || themeMode == 4
+
+    // A chosen accent replaces everything, including the wallpaper: the user
+    // picked a colour on purpose.
+    val userAccent = accent != AccentSeed.Plum
+
+    val colorScheme = when {
+        userAccent -> accentColorScheme(accent, isDark, isAmoled)
+
+        themeMode == 0 -> {
             if (dynamicColor) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     if (systemDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(
@@ -83,62 +109,68 @@ fun DroidVaultTheme(
                 } else {
                     val seed = getLegacySeedColor()
                     seed?.toColorScheme(systemDark)
-                        ?: if (systemDark) DarkColorScheme else LightColorScheme
+                        ?: accentColorScheme(AccentSeed.Plum, systemDark, false)
                 }
             } else {
-                if (systemDark) DarkColorScheme else LightColorScheme
+                accentColorScheme(AccentSeed.Plum, systemDark, false)
             }
         }
 
-        1 -> {
+        themeMode == 1 -> {
             if (dynamicColor) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     dynamicLightColorScheme(context)
                 } else {
                     val seed = getLegacySeedColor()
-                    seed?.toColorScheme(false) ?: LightColorScheme
+                    seed?.toColorScheme(false) ?: accentColorScheme(AccentSeed.Plum, false, false)
                 }
             } else {
-                LightColorScheme
+                accentColorScheme(AccentSeed.Plum, false, false)
             }
         }
 
-        2 -> {
+        themeMode == 2 -> {
             if (dynamicColor) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     dynamicDarkColorScheme(context)
                 } else {
                     val seed = getLegacySeedColor()
-                    seed?.toColorScheme(true) ?: DarkColorScheme
+                    seed?.toColorScheme(true) ?: accentColorScheme(AccentSeed.Plum, true, false)
                 }
             } else {
-                DarkColorScheme
+                accentColorScheme(AccentSeed.Plum, true, false)
             }
         }
 
-        3, 4 -> {
+        else -> {
             if (dynamicColor) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     dynamicDarkColorScheme(context).copy(
-                        background = Color(0xFF000000),
-                        surface = Color(0xFF000000),
-                        surfaceVariant = AmoledSurfaceVariant,
-                        surfaceContainerLowest = AmoledSurfaceLowest,
-                        surfaceContainerLow = AmoledSurfaceLow,
-                        surfaceContainer = AmoledSurface,
-                        surfaceContainerHigh = AmoledSurfaceHigh,
-                        surfaceContainerHighest = AmoledSurfaceHighest
+                        background = DvNeutrals.AmoledBackground,
+                        surface = DvNeutrals.AmoledSurface,
+                        surfaceVariant = DvNeutrals.AmoledSurfaceVariant,
+                        surfaceContainerLowest = DvNeutrals.AmoledCardLowest,
+                        surfaceContainerLow = DvNeutrals.AmoledCardLow,
+                        surfaceContainer = DvNeutrals.AmoledCard,
+                        surfaceContainerHigh = DvNeutrals.AmoledCardHigh,
+                        surfaceContainerHighest = DvNeutrals.AmoledCardHighest
                     )
                 } else {
                     val seed = getLegacySeedColor()
-                    seed?.toColorScheme(isDark = true, isAmoled = true) ?: AmoledAccentColorScheme
+                    seed?.toColorScheme(isDark = true, isAmoled = true)
+                        ?: accentColorScheme(AccentSeed.Plum, true, true)
                 }
             } else {
-                AmoledAccentColorScheme
+                accentColorScheme(AccentSeed.Plum, true, true)
             }
         }
+    }
 
-        else -> LightColorScheme
+    // The semantic roles follow the accent too, so the app's badges and its
+    // chrome are one family — except the two that carry a meaning (danger
+    // and failure), which never move.
+    val rolePalette = remember(accent, isDark) {
+        rolePaletteFor(accent, isDark, roleHues(accent.hue))
     }
 
     MaterialTheme(
@@ -149,7 +181,7 @@ fun DroidVaultTheme(
         // Semantic accents follow the RESOLVED scheme (light/dark/AMOLED and
         // Android 12+ dynamic colour all land here), not the themeMode int.
         CompositionLocalProvider(
-            LocalDvPalette provides dvPaletteFor(colorScheme),
+            LocalDvPalette provides rolePalette,
             // Default the content colour ONCE, here, rather than trusting every
             // container to resolve its own.
             //

@@ -12,6 +12,7 @@
   </p>
 
   <p>
+    <a href="#-whats-new-in-400">What's new</a> ·
     <a href="#-screenshots">Screenshots</a> ·
     <a href="#-features">Features</a> ·
     <a href="#-architecture">Architecture</a> ·
@@ -43,17 +44,41 @@ There is **no cloud account, no telemetry, and no `INTERNET` permission at all.*
 
 ---
 
+## 🆕 What's new in 4.0.0
+
+The full list is in the
+[release notes](https://github.com/phoenix-1708/DroidVault/releases/tag/v4.0.0).
+The short version:
+
+- **The app is no longer blue.** A muted plum accent, warm greys instead of
+  blue-tinted surfaces, and every filled action is a soft plate rather than a
+  bright slab. The button that deletes wears the error colour, so the only
+  saturated thing on a confirmation screen is the thing that destroys.
+- **The colour is yours to choose.** Settings → Theme → Accent colour opens the
+  whole Material palette — nineteen families, every shade of each, a hex field
+  — plus three contrast steps. Rendered through Google's own tonal-palette
+  engine, so every colour in it is legible.
+- **A configuration can leave out an individual app**, even when a label covers
+  it. Its dry run now shows what it *will* do, not the hundreds of apps it will
+  not touch.
+- **Restores tell the truth.** The run screen appears whenever a restore is
+  live, a restored app goes back into the launcher as soon as its own data is
+  back, and the check before a restore reads only the backups that run is about
+  to touch — 1.6 seconds instead of 85.
+
+---
+
 ## 📸 Screenshots
 
 <div align="center">
 
 | Home | Flash | Migrate |
 |:---:|:---:|:---:|
-| <img src="docs/images/home.png" alt="Home — vault health, quick actions and backup location" width="245"/> | <img src="docs/images/flash.png" alt="Flash — auto flash wizard, batch install, partition backup and flash" width="245"/> | <img src="docs/images/migrate.png" alt="Migrate — backup and restore for apps, device data and folders" width="245"/> |
+| <a href="docs/images/home.png"><img src="docs/images/home.png" alt="Home — vault health, quick actions and backup location" width="245"/></a> | <a href="docs/images/flash.png"><img src="docs/images/flash.png" alt="Flash — auto flash wizard, batch install, partition backup and flash" width="245"/></a> | <a href="docs/images/migrate.png"><img src="docs/images/migrate.png" alt="Migrate — backup and restore for apps, device data and folders" width="245"/></a> |
 
 | Tools | Auto |
 |:---:|:---:|
-| <img src="docs/images/tools.png" alt="Tools — debloat and systemize" width="245"/> | <img src="docs/images/auto.png" alt="Auto — labels, configurations, schedules and history" width="245"/> |
+| <a href="docs/images/tools.png"><img src="docs/images/tools.png" alt="Tools — debloat and systemize" width="245"/></a> | <a href="docs/images/auto.png"><img src="docs/images/auto.png" alt="Auto — labels, configurations, schedules and history" width="245"/></a> |
 
 </div>
 
@@ -65,10 +90,11 @@ There is **no cloud account, no telemetry, and no `INTERNET` permission at all.*
 
 | | | |
 |:--|:--|:--|
-| [Overview](#-overview) | [Tech stack](#-tech-stack) | [The vault](#-the-vault) |
-| [Screenshots](#-screenshots) | [Architecture](#-architecture) | [Safety](#-safety) |
-| [Status](#-status) | [Installation](#-installation) | [Contributing](#-contributing) |
-| [Features](#-features) | [Building from source](#-building-from-source) | [Credits](#-credits) · [Disclaimer](#-disclaimer) |
+| [What's new](#-whats-new-in-400) | [Tech stack](#-tech-stack) | [The vault](#-the-vault) |
+| [Overview](#-overview) | [Architecture](#-architecture) | [Safety](#-safety) |
+| [Screenshots](#-screenshots) | [Installation](#-installation) | [Contributing](#-contributing) |
+| [Status](#-status) | [Building from source](#-building-from-source) | [Credits](#-credits) · [Disclaimer](#-disclaimer) |
+| [Features](#-features) | | |
 
 ---
 
@@ -137,6 +163,7 @@ see [Credits](#-credits).
 | **Backup / Restore Apps** | Five components per app, selected independently |
 | **Backup / Restore Device Data** | SMS & MMS, call logs, contacts, Wi-Fi, wallpaper, Bluetooth |
 | **Backup / Restore Folders** | Any folder you nominate, including `Android/data` |
+| **Dry-run preview** | What a configuration *will* do — the apps it covers, the device data it handles, the apps it leaves out |
 | **Manage Backups** | Verify archives and delete them — into the trash first. App and device archives alike, each with its size, date and health |
 | **Export / Import** | Move the whole vault to another phone as one file |
 
@@ -154,6 +181,8 @@ Scheduled runs that execute **headlessly**, with the app closed.
 - Named **configurations**: a selection of apps, device data, and a schedule
 - Triggers: **once · daily · weekly · interval**
 - **Labels** group apps so one rule covers many
+- **Per-app exclusions** — a configuration can leave one app out, even when a
+  label covers it, and the apps it leaves out are named on its card
 - **Run history** with per-run outcome
 - State survives a reinstall — `automation-state.json` lives in the vault and is
   re-imported automatically
@@ -164,6 +193,9 @@ Scheduled runs that execute **headlessly**, with the app closed.
 
 - Size **estimate** that reflects what a run will actually rewrite
 - Vault health, and archive verification before any restore
+- **Accent colour** — the whole Material palette, nineteen families and every
+  shade of each, plus a hex field and three contrast steps
+- **Theme** — light, dark and AMOLED, with the accent you choose
 - Consent gates and diagnostics
 
 ---
@@ -181,8 +213,8 @@ Scheduled runs that execute **headlessly**, with the app closed.
 | **Compression** | `zapdos` — a zstd fork; see [Credits](#-credits) |
 | **Native targets** | Engine cross-compiled for `arm64-v8a`, `armeabi-v7a`, `x86_64`; release APKs are split and ship `arm64-v8a` and `armeabi-v7a` |
 
-Roughly **42k lines of Kotlin**, **9.6k of Rust**, and **788 tests**
-(664 Kotlin + 124 Rust) run on every release.
+Roughly **50k lines of Kotlin**, **10k of Rust**, and **1,033 tests**
+(899 Kotlin + 134 Rust) run on every release.
 
 ---
 
@@ -264,6 +296,18 @@ cannot tell "hung" from "slow" does not get to kill a slow run — which is why 
 
 You need **JDK 21+** to run Gradle, the **Android SDK (API 37)**, and — for the
 native engine only — **Rust** and the **Android NDK**.
+
+<details open>
+<summary><b>Quick start</b></summary>
+
+```sh
+git clone https://github.com/phoenix-1708/DroidVault.git
+cd DroidVault
+sh gradlew testDebugUnitTest      # the Kotlin suite — no NDK needed
+cd engine && cargo test && cd ..  # the engine's own suite
+```
+
+</details>
 
 ```sh
 git clone https://github.com/phoenix-1708/DroidVault.git
@@ -366,23 +410,23 @@ One folder holds everything. **This is what you preserve across a ROM flash.**
 
 ```text
 /storage/emulated/0/DroidVault/
-├── Apps/User/<label>/        per-app archives (.shift files)
+├── Apps/User/<label>/        per-app archives (.vault files)
 ├── Apps/System/<label>/
 ├── Device/
-│   ├── Messages.shift         SMS & MMS
-│   ├── CallLogs.shift         call history
-│   ├── Contacts.shift         contacts (.vcf)
-│   ├── Wi-Fi.shift            saved networks
-│   ├── Wallpaper.shift
-│   ├── Bluetooth.shift
-│   └── Folders.shift          custom folders, manifest inside
+│   ├── Messages.vault         SMS & MMS
+│   ├── CallLogs.vault         call history
+│   ├── Contacts.vault         contacts (.vcf)
+│   ├── Wi-Fi.vault            saved networks
+│   ├── Wallpaper.vault
+│   ├── Bluetooth.vault
+│   └── Folders.vault          custom folders, manifest inside
 ├── DroidVault.apk             this app's own APK — reinstall kit
 ├── DroidVault.engine          engine + launcher mirrors
 ├── automation-state.json      durable automation state (chmod 600)
 └── .trash/                    quarantine for deleted backups, kept 7 days
 ```
 
-Every `.shift` file is a **zstd stream**. The engine records each component's
+Every `.vault` file is a **zstd stream**. The engine records each component's
 size in `Meta.txt` and skips a part whose recorded size still matches the live
 one — so a repeat backup writes only what actually changed.
 
@@ -446,6 +490,7 @@ inside it — is in [`CREDITS.md`](CREDITS.md).
 
 | Document | What it covers |
 |---|---|
+| [Releases](https://github.com/phoenix-1708/DroidVault/releases) | Every version, with its changelog |
 | [`docs/AUTOMATION.md`](docs/AUTOMATION.md) | Headless triggers and external automation |
 | [`docs/SETUP.md`](docs/SETUP.md) | Release secrets, tagging, publishing |
 | [`docs/STABILITY.md`](docs/STABILITY.md) | Crash handling and failure modes |

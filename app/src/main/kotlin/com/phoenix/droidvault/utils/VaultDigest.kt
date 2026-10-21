@@ -5,7 +5,7 @@ import com.topjohnwu.superuser.Shell
 /**
  * The digest that travels beside every archive in the vault.
  *
- * A `.shift` file is a zstd stream, and a stream that decompresses is not proof
+ * A `.vault` file is a zstd stream, and a stream that decompresses is not proof
  * that it is the archive that was written: a same-length edit, a truncated write
  * that still parses, or a file swapped for an older copy all read back fine. The
  * digest is the only record that can see those — and it is the one thing in the
@@ -13,7 +13,7 @@ import com.topjohnwu.superuser.Shell
  *
  * ```sh
  * cd /storage/emulated/0/DroidVault/Device
- * sha256sum -c Messages.shift.sha256      # as root, or over MTP on a copy
+ * sha256sum -c Messages.vault.sha256      # as root, or over MTP on a copy
  * ```
  *
  * ## The format is an interface, not a detail

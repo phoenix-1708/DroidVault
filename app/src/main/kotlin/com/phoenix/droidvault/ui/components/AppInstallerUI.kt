@@ -25,7 +25,6 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Update
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
@@ -48,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import com.phoenix.droidvault.models.AppInstallInfo
 import com.phoenix.droidvault.ui.theme.DvRole
 import com.phoenix.droidvault.ui.theme.dvAccent
+import com.phoenix.droidvault.ui.components.DvButton
 import coil.compose.AsyncImage
 
 @Composable
@@ -60,10 +60,7 @@ fun AppInstallerDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
             if (app.isAnalysisComplete) {
-                Button(
-                    onClick = onInstall,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) {
+                DvButton(onClick = onInstall) {
                     Text(getButtonText(app))
                 }
             }
@@ -230,11 +227,11 @@ fun BatchInstallerDialog(
         title = { BatchInstallerHeader(isRunning, isAnalyzing, totalTime) },
         confirmButton = {
             if (!isRunning && !isAnalyzing && totalTime == 0L) {
-                Button(onClick = onInstall, enabled = selectedCount > 0) {
+                DvButton(onClick = onInstall, enabled = selectedCount > 0) {
                     Text("Install Selected ($selectedCount)")
                 }
             } else if (totalTime > 0L) {
-                Button(onClick = onCancel) { Text("Close") }
+                DvButton(onClick = onCancel) { Text("Close") }
             }
         },
         dismissButton = {

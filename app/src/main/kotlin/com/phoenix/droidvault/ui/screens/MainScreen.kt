@@ -2,6 +2,7 @@ package com.phoenix.droidvault.ui.screens
 import android.widget.Toast
 import com.phoenix.droidvault.ui.safeToast
 
+import androidx.activity.result.ActivityResult
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -75,7 +76,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -151,6 +151,7 @@ import com.phoenix.droidvault.models.FlashAction
 import com.phoenix.droidvault.models.MigratorMode
 import com.phoenix.droidvault.ui.components.AppInstallerDialog
 import com.phoenix.droidvault.ui.components.BatchInstallerDialog
+import com.phoenix.droidvault.ui.components.DvButton
 import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.ui.theme.DvRole
 import com.phoenix.droidvault.ui.theme.DvShapes
@@ -195,6 +196,9 @@ fun MainScreen(viewModel: MainViewModel) {
     // already provides the title + back arrow, so About owns only the body and
     // back returns to Settings instead of leaving Settings entirely.
     var showAbout by rememberSaveable { mutableStateOf(false) }
+    // The accent picker is a SIBLING of Settings, for the same reason: the
+    // shared app bar provides the title and the back arrow.
+    var showAccentPicker by rememberSaveable { mutableStateOf(false) }
     var showExitConfirmation by rememberSaveable { mutableStateOf(false) }
     var dashboardShortcutPending by rememberSaveable { mutableStateOf(false) }
     val context = LocalContext.current
@@ -276,7 +280,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 )
             },
             confirmButton = {
-                Button(onClick = {
+                DvButton(onClick = {
                     com.phoenix.droidvault.utils.AutomationStore.clearRestoreHint(context)
                     viewModel.setTab(4)
                 }) { Text("Open Auto") }
@@ -333,7 +337,7 @@ fun MainScreen(viewModel: MainViewModel) {
             title = { Text("Exit Droid Vault?") },
             text = { Text("Do you want to close the app?") },
             confirmButton = {
-                Button(onClick = {
+                DvButton(onClick = {
                     showExitConfirmation = false
                     (context as? android.app.Activity)?.finish()
                 }) { Text("Exit") }
@@ -467,7 +471,8 @@ fun MainScreen(viewModel: MainViewModel) {
                 } else {
                     backProgress.animateTo(1f, animationSpec = DvMotion.settle(DvMotion.quick))
 
-                    if (showAbout) showAbout = false
+                    if (showAccentPicker) showAccentPicker = false
+                    else if (showAbout) showAbout = false
                     else if (showSettings) showSettings = false
                     else if (appState.flashWizardStep > 0) viewModel.flashWizardStepBack()
                     else viewModel.setMigratorMode(MigratorMode.MENU)
@@ -516,6 +521,8 @@ fun MainScreen(viewModel: MainViewModel) {
                 flashActions = flashActions,
                 showSettings = showSettings,
                 showAbout = showAbout,
+                showAccentPicker = showAccentPicker,
+                onOpenAccentPicker = { showAccentPicker = true },
                 selectedTab = selectedTab,
                 viewModel = viewModel,
                 onTabSelect = selectTab,
@@ -538,21 +545,34 @@ fun MainScreen(viewModel: MainViewModel) {
     }
 }
 
-private data class ProgressOverlayPhase(val name: String, val interactive: Boolean)
+private data class ProgressOverlayPhase(val name: String, val interactive: Boolean, val runId: Long)
 
 private fun progressOverlayPhase(
     progress: com.phoenix.droidvault.models.ProgressState
 ): ProgressOverlayPhase = when (progress) {
-    is com.phoenix.droidvault.models.ProgressState.Running -> ProgressOverlayPhase("R", progress.interactive)
-    is com.phoenix.droidvault.models.ProgressState.Done -> ProgressOverlayPhase("D", progress.interactive)
-    is com.phoenix.droidvault.models.ProgressState.Failed -> ProgressOverlayPhase("F", progress.interactive)
-    com.phoenix.droidvault.models.ProgressState.Idle -> ProgressOverlayPhase("I", true)
+    is com.phoenix.droidvault.models.ProgressState.Running ->
+        ProgressOverlayPhase("R", progress.interactive, com.phoenix.droidvault.utils.ProgressTracker.runId)
+    is com.phoenix.droidvault.models.ProgressState.Done ->
+        ProgressOverlayPhase("D", progress.interactive, com.phoenix.droidvault.utils.ProgressTracker.runId)
+    is com.phoenix.droidvault.models.ProgressState.Failed ->
+        ProgressOverlayPhase("F", progress.interactive, com.phoenix.droidvault.utils.ProgressTracker.runId)
+    com.phoenix.droidvault.models.ProgressState.Idle ->
+        ProgressOverlayPhase("I", true, com.phoenix.droidvault.utils.ProgressTracker.runId)
 }
 
 /**
  * Observes only run phase changes. The full progress stream is consumed by
  * ProcessingScreen, so its frequent byte/step updates never recompose the
  * navigation shell or the pager underneath it.
+ *
+ * Visibility is DERIVED from the run, never transition-detected. A local
+ * `remember` that had to observe Idle -> Running made the page permanently
+ * invisible to anyone who arrived mid-run (rotation, or reopening the app),
+ * which is the "Apps Restoration page not appearing" report — the run's own
+ * status line sat on the screen that started it while the page never came up.
+ * The only remembered decision is the user's own "leave this page", and it
+ * suppresses the RUNNING page only: a run the user backed out of still gets
+ * its completion screen, exactly as the Back dialog promises.
  */
 @Composable
 private fun LiveProcessingOverlay() {
@@ -564,25 +584,12 @@ private fun LiveProcessingOverlay() {
     val phase by phaseFlow.collectAsStateWithLifecycle(
         initialValue = progressOverlayPhase(com.phoenix.droidvault.utils.ProgressTracker.state.value)
     )
-    val showRequests by ProcessingScreenController.showRequests.collectAsStateWithLifecycle()
-    var showProcessing by remember { mutableStateOf(false) }
-    var lastPhase by remember { mutableStateOf<String?>(null) }
+    val hiddenRunId by ProcessingScreenController.hiddenRunId.collectAsStateWithLifecycle()
 
-    LaunchedEffect(phase) {
-        val show = when {
-            lastPhase == null -> false
-            phase.name == "R" && lastPhase != "R" && phase.interactive -> true
-            lastPhase == "R" && (phase.name == "D" || phase.name == "F") && phase.interactive -> true
-            else -> false
-        }
-        if (show) showProcessing = true
-        lastPhase = phase.name
-    }
-    LaunchedEffect(showRequests) {
-        if (showRequests > 0 && phase.name != "I") showProcessing = true
-    }
+    val showProcessing = phase.name != "I" && phase.interactive &&
+        !(phase.name == "R" && hiddenRunId == phase.runId)
 
-    if (showProcessing && phase.name != "I") {
+    if (showProcessing) {
         AnimatedVisibility(
             visible = true,
             enter = fadeIn(DvMotion.settle()) + scaleIn(initialScale = 0.96f, animationSpec = DvMotion.settle()),
@@ -590,8 +597,8 @@ private fun LiveProcessingOverlay() {
             modifier = Modifier.fillMaxSize(),
         ) {
             ProcessingScreen(
-                onBack = { showProcessing = false },
-                onFinished = { showProcessing = false },
+                onBack = { ProcessingScreenController.hide(phase.runId) },
+                onFinished = { ProcessingScreenController.hide(phase.runId) },
             )
         }
     }
@@ -605,6 +612,9 @@ fun AppScaffold(
     flashActions: List<FlashAction>,
     showSettings: Boolean,
     showAbout: Boolean,
+    /** The accent picker is a SIBLING of Settings: the app bar owns its back. */
+    showAccentPicker: Boolean = false,
+    onOpenAccentPicker: () -> Unit = {},
     selectedTab: Int,
     viewModel: MainViewModel,
     onTabSelect: (Int) -> Unit,
@@ -663,6 +673,7 @@ fun AppScaffold(
 
     val dynamicTitle = when {
         showAbout -> "About"
+        showAccentPicker -> "Accent colour"
         showSettings -> "Settings"
         appState.flashWizardStep > 0 -> "Auto Flash Wizard"
         appState.migratorMode != MigratorMode.MENU -> {
@@ -937,11 +948,14 @@ fun AppScaffold(
                                 viewModel.shellUiState
                             }.collectAsStateWithLifecycle()
                             AboutScreen(context = ctx, hasRoot = aboutRoot.hasRoot)
+                        } else if (showAccentPicker) {
+                            AccentPickerScreen(viewModel = viewModel)
                         } else {
                             SettingsTab(
                                 context = LocalContext.current,
                                 viewModel = viewModel,
-                                onOpenAbout = onOpenAbout
+                                onOpenAbout = onOpenAbout,
+                                onOpenAccentPicker = onOpenAccentPicker
                             )
                         }
                     }
@@ -1381,23 +1395,22 @@ fun OnboardingWizard(viewModel: MainViewModel) {
         androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width.toFloat()
 
     val launcher =
-        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            if (uri != null) {
-                // getTreeDocumentId returns null when pathSegments.size() < 2 and
-                // throws for a non-tree URI; getExternalStorageDirectory is null with
-                // no external volume. Both are platform types, so Kotlin inserts no
-                // check. BackupFolderStore.pathFromTreeUri already guards both — these
-                // two callbacks did not, and a bad tree URI from any provider crashed
-                // the screen from inside the ActivityResult callback.
-                val docId = android.provider.DocumentsContract.getTreeDocumentId(uri) ?: return@rememberLauncherForActivityResult
-                val split = docId.split(":")
-                val basePath = android.os.Environment.getExternalStorageDirectory()?.absolutePath
-                    ?: return@rememberLauncherForActivityResult
-                val path = if ("primary".equals(split[0], true)) "$basePath/${split.getOrNull(1) ?: ""}"
-                else "/storage/${split[0]}/${split.getOrNull(1) ?: ""}"
-                val finalPath = if (path.endsWith("DroidVault")) path else "$path/DroidVault"
-                viewModel.migrateFolder(finalPath) { ok -> if (ok) step = 3 }
-            }
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val uri = result.data?.data ?: return@rememberLauncherForActivityResult
+            // getTreeDocumentId returns null when pathSegments.size() < 2 and
+            // throws for a non-tree URI; getExternalStorageDirectory is null with
+            // no external volume. Both are platform types, so Kotlin inserts no
+            // check. BackupFolderStore.pathFromTreeUri already guards both — these
+            // two callbacks did not, and a bad tree URI from any provider crashed
+            // the screen from inside the ActivityResult callback.
+            val docId = android.provider.DocumentsContract.getTreeDocumentId(uri) ?: return@rememberLauncherForActivityResult
+            val split = docId.split(":")
+            val basePath = android.os.Environment.getExternalStorageDirectory()?.absolutePath
+                ?: return@rememberLauncherForActivityResult
+            val path = if ("primary".equals(split[0], true)) "$basePath/${split.getOrNull(1) ?: ""}"
+            else "/storage/${split[0]}/${split.getOrNull(1) ?: ""}"
+            val finalPath = if (path.endsWith("DroidVault")) path else "$path/DroidVault"
+            viewModel.migrateFolder(finalPath) { ok -> if (ok) step = 3 }
         }
 
     /** Creates the default "/storage/emulated/0/DroidVault" folder in place. */
@@ -1494,7 +1507,7 @@ fun OnboardingStepContent(
     context: Context,
     viewModel: MainViewModel,
     onNext: (Int) -> Unit,
-    launcher: androidx.activity.compose.ManagedActivityResultLauncher<Uri?, Uri?>,
+    launcher: androidx.activity.compose.ManagedActivityResultLauncher<Intent, ActivityResult>,
     requestInitialPermissions: () -> Unit,
     createDefaultFolder: () -> Unit = {},
     hasAttemptedAutoDetect: Boolean = false,
@@ -1571,7 +1584,7 @@ fun OnboardingStepContent(
                     )
                     Spacer(Modifier.height(48.dp))
 
-                    Button(
+                    DvButton(
                         onClick = {
                             if (!hasAttemptedAutoDetect) {
                                 isDetecting = true
@@ -1678,7 +1691,7 @@ fun OnboardingStepContent(
                     )
                     Spacer(Modifier.height(16.dp))
 
-                    Button(
+                    DvButton(
                         onClick = { viewModel.migrateFolder(inputPath) { ok -> if (ok) onNext(3) } },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1707,7 +1720,14 @@ fun OnboardingStepContent(
                     }
                     Spacer(Modifier.height(12.dp))
                     OutlinedButton(
-                        onClick = { launcher.launch(null) },
+                        onClick = {
+                            launcher.launch(
+                                com.phoenix.droidvault.utils.VaultFolderPicker.intent(
+                                    context,
+                                    viewModel.savedPath.value
+                                )
+                            )
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(52.dp),
@@ -1751,7 +1771,7 @@ fun OnboardingStepContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(32.dp))
-                    Button(
+                    DvButton(
                         onClick = { viewModel.finishOnboarding() },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1869,7 +1889,7 @@ fun NoRootScreen(
                 }
             }
 
-            Button(
+            DvButton(
                 onClick = onRetry,
                 enabled = !isChecking,
                 shape = MaterialTheme.shapes.large,

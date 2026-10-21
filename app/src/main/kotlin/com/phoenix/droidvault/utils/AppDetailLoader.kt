@@ -2,6 +2,7 @@ package com.phoenix.droidvault.utils
 
 import android.content.Context
 import android.content.pm.PackageManager
+import com.phoenix.droidvault.models.VaultArchive
 import com.phoenix.droidvault.models.AppInfo
 import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.Dispatchers
@@ -37,13 +38,20 @@ data class AppDetail(
  */
 object AppDetailLoader {
 
+    /**
+     * The parts and the archive each one is in, by BASE name.
+     *
+     * The base, not the file name: an archive written before the extension
+     * moved is the same archive under the other name, and the detail screen
+     * has to show whichever is actually on disk.
+     */
     private val PART_FILES = listOf(
-        "APK" to "App.shift",
-        "Data" to "Data.shift",
-        "UserDe" to "UserDe.shift",
-        "ExtData" to "ExtData.shift",
-        "Media" to "Media.shift",
-        "Obb" to "Obb.shift",
+        "APK" to "App",
+        "Data" to "Data",
+        "UserDe" to "UserDe",
+        "ExtData" to "ExtData",
+        "Media" to "Media",
+        "Obb" to "Obb",
         "Permissions" to "Permissions.txt"
     )
 
@@ -51,7 +59,14 @@ object AppDetailLoader {
         withContext(Dispatchers.IO) {
             val sysType = if (app.isSystem) "System" else "User"
             val dir = File("$savedPath/Apps/$sysType/${app.label}")
-            val parts = PART_FILES.map { (name, file) ->
+            val parts = PART_FILES.map { (name, base) ->
+                // The name that is actually there, under either extension.
+                val file = if (base.endsWith(".txt")) {
+                    base
+                } else {
+                    VaultArchive.names(base).firstOrNull { File(dir, it).exists() }
+                        ?: VaultArchive.name(base)
+                }
                 val f = File(dir, file)
                 BackupPartInfo(name, file, if (f.exists()) f.length() else 0L, f.exists())
             }

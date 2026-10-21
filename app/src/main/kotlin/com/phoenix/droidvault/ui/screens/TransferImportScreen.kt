@@ -23,7 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -55,6 +54,7 @@ import com.phoenix.droidvault.models.TransferPlan
 import com.phoenix.droidvault.models.TransferProgress
 import com.phoenix.droidvault.models.VaultTransfer
 import com.phoenix.droidvault.ui.safeToast
+import com.phoenix.droidvault.ui.components.DvButton
 import com.phoenix.droidvault.ui.components.DvIconBadge
 import com.phoenix.droidvault.ui.components.ExportConfirmSheet
 import com.phoenix.droidvault.ui.components.ImportConfirmSheet
@@ -423,7 +423,7 @@ private fun TransferRow(
             // Tonal, not filled: with several cards on screen a row of filled
             // buttons competes with itself, and this is one action among a list
             // rather than the page's single purpose.
-            Button(
+            DvButton(
                 onClick = onImport,
                 enabled = enabled,
                 shape = CircleShape,

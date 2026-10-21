@@ -65,10 +65,29 @@ class DroidVaultApp : Application() {
         // Prefs-only phase SYNCHRONOUS: MainViewModel reads base_path during
         // construction, so the heal must land before the first activity.
         LegacyMigration.migratePrefsOnly(this)
+        // The archive rename is done on every launch after the first, so the
+        // reads that wait for it must not wait for a rename that is not
+        // happening. Settled FIRST, and before the root-shell phase below —
+        // which can take seconds on a vault move, and a reader waiting on it
+        // would hold the Home card for no reason.
+        VaultExtensionMigration.settleIfAlreadyDone(this)
         // Root-shell phase on IO: a vault move (potentially multi-GB) must
         // never block app start (field ANR fix). Re-runnable if the process
         // dies midway.
-        appScope.launch { LegacyMigration.complete(this@DroidVaultApp) }
+        appScope.launch {
+            LegacyMigration.complete(this@DroidVaultApp)
+            // The archives in the vault were written as `*.shift`; they are
+            // now `*.vault`. Every reader resolves both names, so this is a
+            // tidy-up rather than a dependency — but without it the vault
+            // would carry a legacy copy of everything the next backup writes.
+            //
+            // AFTER the move above: renaming the old folder's archives on the
+            // way would be a rename of files that are about to be moved.
+            val vault = getSharedPreferences("droidvault_prefs", MODE_PRIVATE)
+                .getString("base_path", com.phoenix.droidvault.utils.SettingsManager.getDefaultPath())
+                .orEmpty()
+            VaultExtensionMigration.run(this@DroidVaultApp, vault)
+        }
         // Folder backup sources: one process-wide list for Settings, Migrate
         // and Automation config editors.
         com.phoenix.droidvault.utils.BackupFolderStore.init(this)

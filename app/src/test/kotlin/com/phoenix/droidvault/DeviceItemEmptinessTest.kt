@@ -128,14 +128,21 @@ class DeviceItemEmptinessTest {
             // Anchored on the call plus the DESTINATION it writes, not the item
             // label: the label also appears on the restore side, where no
             // emptiness guard belongs and one would be meaningless.
-            val itemIdx = Regex("""packArchive\([^)]*?/""" + Regex.escape(item) + """\.shift""")
-                .find(src)
-                ?: error("packArchive call for $item not found — re-point this test")
+            // The destination is now written through VaultArchive.name(), so
+            // the anchor is the call plus the item's BASE name.
+            // The destination is written through VaultArchive.name(), so the
+            // call is found by looking BACK from the name: a forward pattern
+            // would start at the FIRST packArchive in the file, and the guard
+            // check would then be about the wrong call.
+            val nameIdx = src.indexOf("VaultArchive.name(\"$item\")")
+            if (nameIdx < 0) error("packArchive call for $item not found — re-point this test")
+            val itemIdx = src.lastIndexOf("packArchive(", nameIdx)
+            if (itemIdx < 0) error("packArchive call for $item not found — re-point this test")
             // The guard must appear BEFORE the pack, not after it: a check that
             // runs afterwards has already let the good archive be replaced.
-            val before = src.substring(0, itemIdx.range.first)
+            val before = src.substring(0, itemIdx)
             assertTrue(
-                "$item.shift is packed with no emptiness guard before it: an empty " +
+                "$item.vault is packed with no emptiness guard before it: an empty " +
                     "staged directory packs to a valid archive and replaces the only " +
                     "good copy",
                 before.contains("hasContent")

@@ -1,6 +1,6 @@
 use crate::{
     archive, checksum, command, device, install, manifest, partitions, protocol, quiesce, restore,
-    targets, tools, transfer, verify,
+    targets, tools, transfer, vault, verify,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::env;
@@ -164,7 +164,21 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "--restore-wifi" => {
-            device::restore_wifi(arg(1));
+            // The counts are the answer, and the exit code carries it: a
+            // command that exits 0 after adding nothing is a success the app
+            // must not report, and a partial restore has to name what it could
+            // not do. "Partial is still a failure of this item" is the rule the
+            // Messages path already follows.
+            let outcome = device::restore_wifi(arg(1));
+            if outcome.missing() > 0 {
+                return Err(format!(
+                    "{} of {} saved networks could not be restored ({} not understood by this build, {} refused by the device)",
+                    outcome.missing(),
+                    outcome.found,
+                    outcome.skipped,
+                    outcome.failed
+                ));
+            }
             Ok(())
         }
         "--backup-wallpaper" => {
@@ -172,7 +186,12 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "--restore-wallpaper" => {
-            device::restore_wallpaper(arg(1));
+            if !device::restore_wallpaper(arg(1)) {
+                return Err(
+                    "the wallpaper files could not be placed — the device is still showing the previous wallpaper"
+                        .to_string(),
+                );
+            }
             Ok(())
         }
         "--backup-bt" => {
@@ -180,7 +199,12 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "--restore-bt" => {
-            device::restore_bluetooth(arg(1));
+            if !device::restore_bluetooth(arg(1)) {
+                return Err(
+                    "the Bluetooth pairing data could not be restored — the paired devices are still the ones this phone already knew"
+                        .to_string(),
+                );
+            }
             Ok(())
         }
         "--install-apps" => install_apps(arg(1)),
@@ -199,7 +223,7 @@ pub fn dispatch(args: &[String]) -> Result<(), String> {
         // Archive verification. Exists because a backup that cannot be read
         // back is discovered at restore time, which is the worst moment: the
         // device may already be wiped or the ROM already flashed.
-        "--verify-apps" => verify::verify_apps(arg(1)),
+        "--verify-apps" => verify::verify_apps(arg(1), Some(arg(2))),
         "--verify-device" => verify::verify_device(arg(1)),
         // The vault index. `--check-manifest` answers "is everything still
         // here, at the size it was written?" without reading an archive, which
@@ -325,7 +349,6 @@ fn run_apps(restore: bool, raw_components: &str, base_path: &str) -> Result<(), 
         .map_err(|e| format!("Cannot create engine temp folder: {e}"))?;
     let _ = fs::remove_file(command::CANCEL_FLAG);
     let _ = fs::remove_file(command::BUNDLE_JOURNAL);
-    let _ = fs::remove_file(Path::new(command::TEMP_DIR).join("restore_queue.list"));
     let started = Instant::now();
     let total_weight = apps
         .iter()
@@ -424,13 +447,10 @@ fn run_apps(restore: bool, raw_components: &str, base_path: &str) -> Result<(), 
         );
     }
 
-    if restore {
-        if !command::cancelled() {
-            restore_ownership();
-        }
-        if env::var("ALLOW_VERIFIER_DISABLE").ok().as_deref() == Some("1") {
-            verifier_mode(false);
-        }
+    // Restored unconditionally, cancelled or not: it was switched on for the
+    // whole run and must not be left off.
+    if restore && env::var("ALLOW_VERIFIER_DISABLE").ok().as_deref() == Some("1") {
+        verifier_mode(false);
     }
     if !command::cancelled() {
         protocol::info("Almost Done, Please Wait...");
@@ -544,9 +564,9 @@ fn backup_app(
     // genuinely there and readable. Deleting a backup stays what the user does
     // deliberately, from Manage backups, where it goes through the trash.
     let excluded: [(&str, &[&str]); 3] = [
-        ("Data", &["Data.shift", "UserDe.shift", "ExtData.shift"]),
+        ("Data", &["Data", "UserDe", "ExtData"]),
         ("Perm", &["Permissions.txt"]),
-        ("Media", &["Media.shift", "Obb.shift"]),
+        ("Media", &["Media", "Obb"]),
     ];
     for (part, names) in excluded {
         let wanted = match part {
@@ -554,9 +574,22 @@ fn backup_app(
             "Perm" => comps.has(3),
             _ => comps.has(4),
         };
-        let exists = names.iter().any(|n| dir.join(n).is_file());
-        if retained_part(wanted, exists) == RetainAction::Keep {
-            keep_files(&app.package, part, dir, names);
+        // Both names: an archive written under the old extension is still an
+        // archive, and a part that exists must not be re-packed just because
+        // the extension moved.
+        let present: Vec<String> = names
+            .iter()
+            .flat_map(|n| {
+                if n.ends_with(".txt") {
+                    vec![n.to_string()]
+                } else {
+                    vault::archive_names(n)
+                }
+            })
+            .filter(|n| dir.join(n).is_file())
+            .collect();
+        if retained_part(wanted, !present.is_empty()) == RetainAction::Keep {
+            keep_files(&app.package, part, dir, &present);
         }
     }
 
@@ -566,8 +599,13 @@ fn backup_app(
     // keeps whatever the archive that HOLDS the data recorded.
     let mut consistency: Option<quiesce::Quiesce> = None;
     if comps.has(1) {
-        let dest = dir.join("App.shift");
-        if old.app_size != app.app_size.to_string() || !dest.exists() {
+        // The App archive is WRITTEN under the new name. The check asks
+        // whether an archive is there at all, under either name: an archive
+        // written before the extension moved is still this app's backup, and
+        // re-packing it because of a name change would double the space the
+        // app occupies for no reason.
+        let dest = dir.join(vault::archive_name("App"));
+        if old.app_size != app.app_size.to_string() || !vault::has_archive(dir, "App") {
             protocol::part(&app.package, "App", 1, "");
             let apk_dir = Path::new(&app.apk_path);
             let root = if apk_dir.is_dir() {
@@ -613,8 +651,7 @@ fn backup_app(
             ("/data/media/0/Android/data", "ExtData"),
         ];
         let missing_source_archive = archives.iter().any(|(root, name)| {
-            Path::new(root).join(&app.package).is_dir()
-                && !dir.join(format!("{name}.shift")).is_file()
+            Path::new(root).join(&app.package).is_dir() && !vault::has_archive(dir, name)
         });
         if old.data_size != app.data_size.to_string() || missing_source_archive {
             // About to read the app's data: stop it first if it is running, or
@@ -625,7 +662,7 @@ fn backup_app(
             for (root, name) in archives {
                 let source = Path::new(root).join(&app.package);
                 if source.is_dir() {
-                    let output = dir.join(format!("{name}.shift"));
+                    let output = dir.join(vault::archive_name(name));
                     if matches!(
                         archive::pack_path(Path::new(root), Path::new(&app.package), &output),
                         Ok(packed) if packed.wrote()
@@ -672,8 +709,7 @@ fn backup_app(
             ("/data/media/0/Android/obb", "Obb"),
         ];
         let missing_source_archive = archives.iter().any(|(root, name)| {
-            Path::new(root).join(&app.package).is_dir()
-                && !dir.join(format!("{name}.shift")).is_file()
+            Path::new(root).join(&app.package).is_dir() && !vault::has_archive(dir, name)
         });
         let has_media_dir = Path::new(archives[0].0).join(&app.package).is_dir();
         let has_obb_dir = Path::new(archives[1].0).join(&app.package).is_dir();
@@ -710,7 +746,7 @@ fn backup_app(
                 let mut any = false;
                 for (root, name) in present {
                     let source = Path::new(root).join(&app.package);
-                    let output = dir.join(format!("{name}.shift"));
+                    let output = dir.join(vault::archive_name(name));
                     if matches!(
                         archive::pack_path(Path::new(root), Path::new(&app.package), &output),
                         Ok(packed) if packed.wrote()
@@ -758,12 +794,12 @@ fn restore_app(
     free_kb: &mut HashMap<String, u64>,
 ) -> Result<(), String> {
     fs::create_dir_all(command::TEMP_DIR).map_err(|e| e.to_string())?;
-    let app_archive = dir.join("App.shift");
+    let app_archive = vault::existing_archive(dir, "App");
     if comps.has(1)
-        && app_archive.is_file()
+        && app_archive.is_some()
         && !tools::package_installed(&app.package, &app.version_code)
     {
-        match install::install_backup(&app_archive, &app.package, &app.label) {
+        match install::install_backup(app_archive.as_deref().unwrap(), &app.package, &app.label) {
             Ok(()) => protocol::install_done(&app.package),
             Err(error) => protocol::install_error(&app.package, &error),
         }
@@ -786,10 +822,6 @@ fn restore_app(
     .trim()
     .to_string();
     let installed = !uid.is_empty();
-    let mut queue = String::new();
-    if installed {
-        queue.push_str(&format!("{}|{}\n", app.package, uid));
-    }
     let meta = Meta::read(dir);
 
     if !installed {
@@ -826,25 +858,27 @@ fn restore_app(
             }
         }
         let restore_sets = [
-            (2, "Data", "/data/data", "Data.shift"),
-            (2, "Data", "/data/user_de/0", "UserDe.shift"),
-            (2, "Data", "/data/media/0/Android/data", "ExtData.shift"),
-            (4, "Media", "/data/media/0/Android/media", "Media.shift"),
-            (4, "Media", "/data/media/0/Android/obb", "Obb.shift"),
+            (2, "Data", "/data/data", "Data"),
+            (2, "Data", "/data/user_de/0", "UserDe"),
+            (2, "Data", "/data/media/0/Android/data", "ExtData"),
+            (4, "Media", "/data/media/0/Android/media", "Media"),
+            (4, "Media", "/data/media/0/Android/obb", "Obb"),
         ];
         // Once per app, before the first tree is replaced: an app that is
         // running holds the old data open and writes into the new tree while it
         // is placed — the interleaved mix the fresh-install path already guards
         // against with `cmd package disable`, on the path that did not.
         let mut quiet: Option<quiesce::Quiesce> = None;
-        for (component, display, target, archive_name) in restore_sets {
+        for (component, display, target, archive_base) in restore_sets {
             if !comps.has(component) {
                 continue;
             }
-            let archive_path = dir.join(archive_name);
-            if !archive_path.is_file() {
-                continue;
-            }
+            // Resolved, not assumed: an archive written under the old
+            // extension is still this part's archive.
+            let archive_path = match vault::existing_archive(dir, archive_base) {
+                Some(path) => path,
+                None => continue,
+            };
             protocol::part(&app.package, display, 1, "");
             quiesce::ensure_quiet(&app.package, running, &mut quiet);
             // THIS archive's recorded size gates THIS archive's staging decision;
@@ -890,17 +924,13 @@ fn restore_app(
             }
         }
         if comps.has(2)
-            && !["Data.shift", "UserDe.shift", "ExtData.shift"]
+            && !["Data", "UserDe", "ExtData"]
                 .iter()
-                .any(|n| dir.join(n).is_file())
+                .any(|n| vault::has_archive(dir, n))
         {
             protocol::part(&app.package, "Data", 3, "no data in backup");
         }
-        if comps.has(4)
-            && !["Media.shift", "Obb.shift"]
-                .iter()
-                .any(|n| dir.join(n).is_file())
-        {
+        if comps.has(4) && !["Media", "Obb"].iter().any(|n| vault::has_archive(dir, n)) {
             protocol::part(&app.package, "Media", 3, "no media in backup");
         }
     }
@@ -933,16 +963,18 @@ fn restore_app(
             protocol::part(&app.package, "Perm", 3, "no permissions in backup");
         }
     }
-    if !queue.is_empty() {
-        let path = Path::new(command::TEMP_DIR).join("restore_queue.list");
-        use std::io::Write;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| e.to_string())?;
-        file.write_all(queue.as_bytes())
-            .map_err(|e| e.to_string())?;
+    if installed {
+        // Hand the app back NOW, not at the end of the run. `cmd package
+        // disable` above is what removed it from `pm list packages -e`, so
+        // until this line runs the app is installed, has its data, and is
+        // invisible — the app drawer stayed empty for a whole ROM-flash restore
+        // and then filled in all at once.
+        restore::finish_restored_app(&app.package, &uid);
+        // The tree is now usable, so this package's journal entry has served its
+        // purpose. Until this line runs, a killed run leaves the entry behind and
+        // the next run finishes the fix instead of leaving root-owned,
+        // mislabeled data the app cannot read.
+        restore::clear_pending(&app.package);
     }
     protocol::done_pkg(true, &app.package);
     Ok(())
@@ -954,10 +986,10 @@ fn restore_app(
 /// already renders as a quiet chip rather than a failure. Naming the files in
 /// the reason is what makes it honest: the user can see that their earlier
 /// archive is still there instead of assuming it was thrown away.
-fn keep_files(pkg: &str, part: &str, dir: &Path, names: &[&str]) {
+fn keep_files(pkg: &str, part: &str, dir: &Path, names: &[String]) {
     let kept: Vec<&str> = names
         .iter()
-        .copied()
+        .map(|n| n.as_str())
         .filter(|n| dir.join(n).is_file())
         .collect();
     if kept.is_empty() {
@@ -1357,51 +1389,6 @@ fn set_permissions(package: &str, file: &Path, uid: &str) -> bool {
     any
 }
 
-fn restore_ownership() {
-    let queue = Path::new(command::TEMP_DIR).join("restore_queue.list");
-    let Ok(lines) = fs::read_to_string(&queue) else {
-        return;
-    };
-    for line in lines.lines() {
-        if command::cancelled() {
-            protocol::raw("ACTION:CANCELLED");
-            break;
-        }
-        let Some((package, uid)) = line.split_once('|') else {
-            continue;
-        };
-        if !command::valid_package(package) || !uid.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        // Ownership and labels live in ONE implementation, shared with the
-        // journal's recovery pass: two copies of this rule drift, and the copy
-        // that drifts silently is the one that only runs after a crash.
-        restore::fix_ownership_and_labels(package, uid);
-        let _ = command::status(
-            "rm",
-            [
-                "-f",
-                &format!("/data/data/{package}/databases/com.google.android.datatransport.events"),
-                &format!(
-                    "/data/data/{package}/databases/com.google.android.datatransport.events-journal"
-                ),
-                &format!("/data/data/{package}/no_backup/com.google.android.gms.appid-no-backup"),
-                &format!("/data/data/{package}/shared_prefs/com.google.android.gms.appid.xml"),
-                &format!(
-                    "/data/data/{package}/shared_prefs/com.google.android.gms.measurement.prefs.xml"
-                ),
-            ],
-        );
-        let _ = command::status("cmd", ["package", "enable", package]);
-        // The tree is now usable, so this package's journal entry has served its
-        // purpose. Until this line runs, a killed run leaves the entry behind and
-        // the next run finishes the fix instead of leaving root-owned,
-        // mislabeled data the app cannot read.
-        restore::clear_pending(package);
-    }
-    let _ = fs::remove_file(queue);
-}
-
 fn verifier_mode(enable_fast: bool) {
     if enable_fast {
         let _ = command::status("cmd", ["package", "disable", "com.android.vending"]);
@@ -1509,7 +1496,7 @@ fn kill_jobs() {
         }
         if let Some(output) = fields
             .next()
-            .filter(|p| p.ends_with(".shift") || p.ends_with(".shift.tmp"))
+            .filter(|p| vault::is_archive_name(p) || p.ends_with(".tmp"))
         {
             let _ = fs::remove_file(output);
         }
@@ -1896,16 +1883,20 @@ mod retention_tests {
     fn keep_files_leaves_earlier_archives_byte_for_byte() {
         let tmp = std::env::temp_dir().join(format!("dv_keep_{}", std::process::id()));
         fs::create_dir_all(&tmp).expect("temp dir");
-        for name in ["Data.shift", "UserDe.shift", "ExtData.shift"] {
+        for name in ["Data.vault", "UserDe.vault", "ExtData.vault"] {
             fs::write(tmp.join(name), b"precious earlier backup").expect("seed");
         }
         keep_files(
             "com.x",
             "Data",
             &tmp,
-            &["Data.shift", "UserDe.shift", "ExtData.shift"],
+            &[
+                "Data.vault".to_string(),
+                "UserDe.vault".to_string(),
+                "ExtData.vault".to_string(),
+            ],
         );
-        for name in ["Data.shift", "UserDe.shift", "ExtData.shift"] {
+        for name in ["Data.vault", "UserDe.vault", "ExtData.vault"] {
             assert_eq!(
                 fs::read(tmp.join(name)).expect("still there"),
                 b"precious earlier backup",
@@ -1916,13 +1907,31 @@ mod retention_tests {
     }
 
     #[test]
+    fn a_legacy_named_archive_is_kept_too() {
+        // The extension moved from `*.vault` to `*.vault`. An archive written
+        // before it moved is the same archive, and it must survive an excluded
+        // re-backup exactly as a new one does — it is the only copy of that
+        // app's data until the app is backed up again.
+        let tmp = std::env::temp_dir().join(format!("dv_keep_legacy_{}", std::process::id()));
+        fs::create_dir_all(&tmp).expect("temp dir");
+        fs::write(tmp.join("Data.vault"), b"precious earlier backup").expect("seed");
+        keep_files("com.x", "Data", &tmp, &["Data.vault".to_string()]);
+        assert_eq!(
+            fs::read(tmp.join("Data.vault")).expect("still there"),
+            b"precious earlier backup",
+            "an archive written before the extension moved must survive too"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn keep_files_is_silent_when_nothing_was_there() {
         let tmp = std::env::temp_dir().join(format!("dv_keep_empty_{}", std::process::id()));
         fs::create_dir_all(&tmp).expect("temp dir");
         // Must not panic and must not create anything: reporting a kept archive
         // that does not exist would be the same dishonesty in the other direction.
-        keep_files("com.x", "Media", &tmp, &["Media.shift"]);
-        assert!(!tmp.join("Media.shift").exists());
+        keep_files("com.x", "Media", &tmp, &["Media.vault".to_string()]);
+        assert!(!tmp.join("Media.vault").exists());
         assert_eq!(fs::read_dir(&tmp).expect("readable").count(), 0);
         let _ = fs::remove_dir_all(&tmp);
     }

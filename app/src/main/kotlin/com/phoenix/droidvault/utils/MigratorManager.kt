@@ -12,6 +12,7 @@ import android.os.storage.StorageManager.UUID_DEFAULT
 import androidx.core.content.pm.PackageInfoCompat
 import androidx.core.graphics.createBitmap
 import com.phoenix.droidvault.BuildConfig
+import com.phoenix.droidvault.models.VaultArchive
 import com.phoenix.droidvault.models.AppInfo
 import com.phoenix.droidvault.models.AppParts
 import com.phoenix.droidvault.models.AppSeed
@@ -146,7 +147,7 @@ object MigratorManager {
 
             for (path in paths) {
                 // Files too, not just app directories: the Device/ archives
-                // (Messages.shift, CallLogs.shift, Folders.shift) are single
+                // (Messages.vault, CallLogs.vault, Folders.vault) are single
                 // files, and a quarantiner that silently skipped them would leave
                 // the only unrecoverable deletion in the app un-quarantined.
                 if (!File(path).exists() && !Shell.cmd("[ -e ${ShellQuote.q(path)} ]").exec().isSuccess) {
@@ -360,10 +361,26 @@ object MigratorManager {
      * because an empty report and a vault with nothing in it look identical and
      * only one of them is true.
      */
+    /**
+     * Verify the vault's archives.
+     *
+     * [packages] narrows the APP half to the apps a restore is about to touch.
+     * It is not an optimisation: the check's cost is the bytes it reads, and
+     * hashing every archive in the vault to vouch for eight of them was 85
+     * seconds of waiting before an eight-app restore began (measured on the
+     * reference device — the gate was four fifths of the wall clock, and the
+     * plan's own eight apps were a ninth of the bytes it read).
+     *
+     * A filter the engine cannot read makes it check EVERYTHING rather than
+     * less: a gate that quietly skipped an archive would vouch for bytes
+     * nobody read.
+     */
     suspend fun verifyBackups(
         context: Context,
         vaultPath: String,
-        deviceData: Boolean = false
+        deviceData: Boolean = false,
+        packages: Set<String>? = null,
+        onProgress: ((checked: Int, total: Int) -> Unit)? = null
     ): VerificationReport = withContext(Dispatchers.IO) {
         ShellQuote.requireAbsPath(vaultPath)
         if (!BackendInstaller.isEngineUpToDate(context) && !BackendInstaller.installEngine(context)) {
@@ -373,7 +390,12 @@ object MigratorManager {
         }
         val verb = if (deviceData) "--verify-device" else "--verify-apps"
         val env = InstallerPolicy.shellEnv(context)
-        val command = "$env sh /data/adb/DroidVault/DroidVault.sh $verb ${ShellQuote.q(vaultPath)}"
+        // The filter is one quoted argument: package names cannot contain a
+        // comma, and the engine refuses to read a filter it does not
+        // understand.
+        val filter = if (deviceData) "" else ShellQuote.q(packages.orEmpty().joinToString(","))
+        val command =
+            "$env sh /data/adb/DroidVault/DroidVault.sh $verb ${ShellQuote.q(vaultPath)} $filter"
         var report = VerificationReport()
         // Verification reads every archive back through zapdos + tar, so its
         // cost scales with the bytes in the vault. The flat half hour this used
@@ -389,7 +411,15 @@ object MigratorManager {
         ShellEngine.executeEngineCommand(command, timeoutMs = verifyWatchdogMs)
             .collect { event ->
                 when (event) {
-                    is EngineEvent.RawLog -> report = VerificationParser.parse(event.line, report)
+                    is EngineEvent.RawLog -> {
+                        val before = report.apps.size
+                        report = VerificationParser.parse(event.line, report)
+                        // One line per app checked: the caller shows the check
+                        // moving instead of a frozen screen.
+                        if (report.apps.size != before) {
+                            onProgress?.invoke(report.apps.size, packages?.size ?: 0)
+                        }
+                    }
                     is EngineEvent.Error -> report = report.copy(error = event.msg)
                     is EngineEvent.Cancelled -> report = report.copy(cancelled = true)
                     else -> Unit
@@ -624,14 +654,18 @@ object MigratorManager {
 
                             val availInBackup = mutableSetOf<Int>()
                             if (metaMtime > 0L) {
-                                if (indexed(vaultFiles, "$appDir/App.shift")) availInBackup.add(1)
-                                if (indexed(vaultFiles, "$appDir/Data.shift") ||
-                                    indexed(vaultFiles, "$appDir/ExtData.shift") ||
-                                    indexed(vaultFiles, "$appDir/UserDe.shift")
+                                // Resolved under either extension: an archive
+                                // written before the extension moved is still
+                                // this app's backup, and a plan that missed it
+                                // would back the app up a second time.
+                                if (VaultArchive.present(vaultFiles, appDir, "App")) availInBackup.add(1)
+                                if (VaultArchive.present(vaultFiles, appDir, "Data") ||
+                                    VaultArchive.present(vaultFiles, appDir, "ExtData") ||
+                                    VaultArchive.present(vaultFiles, appDir, "UserDe")
                                 ) availInBackup.add(2)
                                 if (indexed(vaultFiles, "$appDir/Permissions.txt")) availInBackup.add(3)
-                                if (indexed(vaultFiles, "$appDir/Media.shift") ||
-                                    indexed(vaultFiles, "$appDir/Obb.shift")
+                                if (VaultArchive.present(vaultFiles, appDir, "Media") ||
+                                    VaultArchive.present(vaultFiles, appDir, "Obb")
                                 ) availInBackup.add(4)
 
                                 if (ssaidMetaFiles.contains("$appDir/Meta.txt")) availInBackup.add(5)
@@ -809,14 +843,14 @@ object MigratorManager {
                             }
 
                             val availInBackup = mutableSetOf<Int>()
-                            if (indexed(vaultFiles, "$appDir/App.shift")) availInBackup.add(1)
-                            if (indexed(vaultFiles, "$appDir/Data.shift") ||
-                                indexed(vaultFiles, "$appDir/ExtData.shift") ||
-                                indexed(vaultFiles, "$appDir/UserDe.shift")
+                            if (VaultArchive.present(vaultFiles, appDir, "App")) availInBackup.add(1)
+                            if (VaultArchive.present(vaultFiles, appDir, "Data") ||
+                                VaultArchive.present(vaultFiles, appDir, "ExtData") ||
+                                VaultArchive.present(vaultFiles, appDir, "UserDe")
                             ) availInBackup.add(2)
                             if (indexed(vaultFiles, "$appDir/Permissions.txt")) availInBackup.add(3)
-                            if (indexed(vaultFiles, "$appDir/Media.shift") ||
-                                indexed(vaultFiles, "$appDir/Obb.shift")
+                            if (VaultArchive.present(vaultFiles, appDir, "Media") ||
+                                VaultArchive.present(vaultFiles, appDir, "Obb")
                             ) availInBackup.add(4)
                             if (data.containsKey("SSAID")) availInBackup.add(5)
 
@@ -948,7 +982,7 @@ object MigratorManager {
                 // Label dirs are created from the SANITIZED label — probe the
                 // same value so the byte watch tracks the real artifacts.
                 val appDir = "$currentPath/Apps/$sysType/${ShellQuote.safeLabel(app.label)}"
-                // Byte watch per part. Backup polls the growing .shift outputs;
+                // Byte watch per part. Backup polls the growing archive outputs;
                 // RESTORE polls the extraction TARGET dirs (root-only — the
                 // tracker measures them with one batched root `du` per tick).
                 // Without it a 15 GB extraction sat on a motionless spinner
@@ -960,14 +994,24 @@ object MigratorManager {
                 }
                 val watch = when {
                     !isRestore -> buildMap {
-                        if (comps.contains(1)) put(Parts.APP, listOf("$appDir/App.shift"))
+                        // The files a backup is growing. The NEW names: a
+                        // backup writes those, and the byte watch follows the
+                        // write, not what an older run left behind.
+                        if (comps.contains(1)) put(Parts.APP, listOf("$appDir/${VaultArchive.name("App")}"))
                         if (comps.contains(2)) put(
                             Parts.DATA,
-                            listOf("$appDir/Data.shift", "$appDir/UserDe.shift", "$appDir/ExtData.shift")
+                            listOf(
+                                "$appDir/${VaultArchive.name("Data")}",
+                                "$appDir/${VaultArchive.name("UserDe")}",
+                                "$appDir/${VaultArchive.name("ExtData")}"
+                            )
                         )
                         if (comps.contains(4)) put(
                             Parts.MEDIA,
-                            listOf("$appDir/Media.shift", "$appDir/Obb.shift")
+                            listOf(
+                                "$appDir/${VaultArchive.name("Media")}",
+                                "$appDir/${VaultArchive.name("Obb")}"
+                            )
                         )
                     }
                     safePkg.isNotEmpty() -> buildMap {
@@ -1206,14 +1250,16 @@ object MigratorManager {
                     val curMedia = activeComps.contains(4)
                     val curId = activeComps.contains(5)
 
-                    if (curApp && indexed(vaultFiles, "$basePath/App.shift")) parts.add("App")
-                    if (curData && (indexed(vaultFiles, "$basePath/Data.shift") ||
-                            indexed(vaultFiles, "$basePath/UserDe.shift") ||
-                            indexed(vaultFiles, "$basePath/ExtData.shift"))
+                    // Resolved under either extension — the restore plan must
+                    // offer the archive that is actually there.
+                    if (curApp && VaultArchive.present(vaultFiles, basePath, "App")) parts.add("App")
+                    if (curData && (VaultArchive.present(vaultFiles, basePath, "Data") ||
+                            VaultArchive.present(vaultFiles, basePath, "UserDe") ||
+                            VaultArchive.present(vaultFiles, basePath, "ExtData"))
                     ) parts.add("Data")
                     if (curPerm && indexed(vaultFiles, "$basePath/Permissions.txt")) parts.add("Perm")
-                    if (curMedia && (indexed(vaultFiles, "$basePath/Media.shift") ||
-                            indexed(vaultFiles, "$basePath/Obb.shift"))
+                    if (curMedia && (VaultArchive.present(vaultFiles, basePath, "Media") ||
+                            VaultArchive.present(vaultFiles, basePath, "Obb"))
                     ) parts.add("Media")
                     if (curId) {
                         try {

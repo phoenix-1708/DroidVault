@@ -16,10 +16,10 @@ import androidx.compose.runtime.Immutable
  * that merges them and invisible on the screen that does not (invariant 18: one
  * gate, one implementation) — and it is exactly what happened here: the device
  * rows were parsed into a parallel report nothing ever read, so a damaged
- * `Messages.shift` reached the restore gate as an anonymous count and passed.
+ * `Messages.vault` reached the restore gate as an anonymous count and passed.
  *
  * The file name is the identity. [item] is the plan-side key when this build
- * knows the archive; a `.shift` this build has no item for is still a finding,
+ * knows the archive; a `.vault` this build has no item for is still a finding,
  * and reporting it as some other item — the old parser defaulted an unknown name
  * to Messages — would put a confident label on the wrong file.
  */
@@ -27,7 +27,7 @@ import androidx.compose.runtime.Immutable
 data class DeviceVerification(
     /** The item a restore plan selects, or null for an archive with no item. */
     val item: DeviceDataItem?,
-    /** The archive file name the engine verified, e.g. "Messages.shift". */
+    /** The archive file name the engine verified, e.g. "Messages.vault". */
     val archiveName: String,
     /** Whether the engine could read the archive back at all. */
     val ok: Boolean,
@@ -44,7 +44,7 @@ data class DeviceVerification(
      * or its age is unknown.
      *
      * Same rule as the app rows, and for the same reason: a finding is not
-     * withdrawn by a later run, so without an age the card says "Messages.shift
+     * withdrawn by a later run, so without an age the card says "Messages.vault
      * changed" in the present tense about something four runs ago. Carried
      * forward by `VerificationReport.withFindingAges`, matched on the archive
      * name, since that is this row's identity.

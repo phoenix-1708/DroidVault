@@ -34,6 +34,8 @@ use crate::command;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 /// The suffix a sidecar carries. Deliberately the same `.<algo>sum`-style name
 /// the partition images already use, so one rule covers the whole vault.
@@ -57,26 +59,73 @@ pub fn parse_sha256sum(output: &str) -> Option<String> {
     Some(digest.to_ascii_lowercase())
 }
 
-/// Digests for many files from ONE `sha256sum` invocation, keyed by the path as
-/// passed.
+/// How many `sha256sum` processes may run at once.
 ///
-/// Deep verify hashes every part of every app. Process start is a few
-/// milliseconds on the reference device, so one spawn per file would spend
-/// seconds in `fork` and `exec` alone on a vault with a couple of hundred
-/// apps — measurable as nothing but overhead, since each spawn reads a few KB.
+/// The hash is the most expensive thing a restore does before it starts, and it
+/// is CPU-bound: measured on the reference device, 13.25 GB took 34.7 s of which
+/// 25.5 s was CPU (SHA-256 at roughly 850 MB/s per core) — so the wall clock
+/// is set by how many cores are busy, not by the storage.
+///
+/// Four is the number that measured well: the same 16 GB hashed by three
+/// processes took 16.3 s against 23.5 s for one, and the phone has eight cores.
+/// More would read the storage faster than it can deliver.
+const HASH_WORKERS: usize = 4;
+
+/// Digests for many files, keyed by the path as passed.
+///
+/// The files are hashed by a few `sha256sum` processes at once rather than one
+/// for the whole list. Deep verify hashes every part of every app, and the hash
+/// is CPU-bound on a phone, so one process leaves seven cores idle: the same
+/// 16 GB took 23.5 s in one process and 16.3 s in three.
+///
+/// The wall clock is still set by the LARGEST single archive — a hash of one
+/// file cannot be split — which is why the biggest file is handed to a worker
+/// first.
+///
 /// A file that cannot be read simply has no line, and is therefore "no digest"
 /// rather than a mismatch.
 pub fn hash_files(paths: &[PathBuf]) -> HashMap<String, String> {
     if paths.is_empty() {
         return HashMap::new();
     }
-    let args: Vec<String> = paths
+    // Biggest first: it is the one that decides the wall clock, and it should
+    // not queue behind a hundred small ones. The workers pop from the END, so
+    // the list is sorted ascending.
+    let mut ordered: Vec<String> = paths
         .iter()
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    parse_sha256sum_lines(&command::text("sha256sum", args))
-        .into_iter()
-        .collect()
+    ordered.sort_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0));
+
+    let queue = Arc::new(Mutex::new(ordered));
+    let results: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let workers = HASH_WORKERS.min(paths.len());
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let queue = Arc::clone(&queue);
+        let results = Arc::clone(&results);
+        handles.push(thread::spawn(move || {
+            loop {
+                // One file at a time, taken from the shared queue: the queue IS
+                // the scheduler, and a worker that is slow with a big file does
+                // not hold the others back.
+                let next = { queue.lock().expect("hash queue").pop() };
+                let Some(path) = next else { break };
+                let out = command::text("sha256sum", [path]);
+                let parsed = parse_sha256sum_lines(&out);
+                if !parsed.is_empty() {
+                    let mut guard = results.lock().expect("hash results");
+                    for (p, digest) in parsed {
+                        guard.insert(p, digest);
+                    }
+                }
+            }
+        }));
+    }
+    for handle in handles {
+        let _ = handle.join();
+    }
+    results.lock().expect("hash results").clone()
 }
 
 /// Pure half of [`hash_files`]: the `(path, digest)` pairs in `sha256sum`
@@ -289,7 +338,7 @@ mod tests {
     #[test]
     fn sha256sum_output_parsing() {
         assert_eq!(
-            parse_sha256sum(&format!("{DIGEST}  /vault/Apps/User/App/Data.shift\n")),
+            parse_sha256sum(&format!("{DIGEST}  /vault/Apps/User/App/Data.vault\n")),
             Some(DIGEST.to_string())
         );
         assert_eq!(parse_sha256sum(""), None);
@@ -304,8 +353,8 @@ mod tests {
 
     #[test]
     fn sidecar_line_is_the_format_sha256sum_consumes() {
-        let line = sidecar_line(Path::new("/vault/Apps/User/Some App/Data.shift"), DIGEST).unwrap();
-        assert_eq!(line, format!("{DIGEST}  Data.shift\n"));
+        let line = sidecar_line(Path::new("/vault/Apps/User/Some App/Data.vault"), DIGEST).unwrap();
+        assert_eq!(line, format!("{DIGEST}  Data.vault\n"));
         // Two spaces: `sha256sum -c` splits on the first field and treats the
         // rest as the file name, so a single space would still work, but the
         // canonical form is what every other tool emits.
@@ -315,7 +364,7 @@ mod tests {
     #[test]
     fn a_name_that_cannot_be_expressed_is_refused() {
         assert_eq!(
-            sidecar_line(Path::new("/vault/odd\nname.shift"), DIGEST),
+            sidecar_line(Path::new("/vault/odd\nname.vault"), DIGEST),
             None
         );
     }
@@ -323,7 +372,7 @@ mod tests {
     #[test]
     fn sidecar_parsing_accepts_both_spellings_and_rejects_junk() {
         assert_eq!(
-            parse_sidecar(&format!("{DIGEST}  Data.shift\n")),
+            parse_sidecar(&format!("{DIGEST}  Data.vault\n")),
             Some(DIGEST.to_string())
         );
         assert_eq!(parse_sidecar(DIGEST), Some(DIGEST.to_string()));
@@ -332,7 +381,7 @@ mod tests {
             None,
             "an empty sidecar records nothing"
         );
-        assert_eq!(parse_sidecar("not-a-digest  Data.shift\n"), None);
+        assert_eq!(parse_sidecar("not-a-digest  Data.vault\n"), None);
         // Uppercase hex is the same digest.
         assert_eq!(
             parse_sidecar(&DIGEST.to_uppercase()),
@@ -345,7 +394,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dv-reconcile-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("Messages.shift");
+        let file = dir.join("Messages.vault");
         fs::write(&file, b"some bytes").unwrap();
         let digest = hash_file(&file).expect("sha256sum on the build host");
 
@@ -395,18 +444,18 @@ mod tests {
     fn batch_parsing_keeps_every_name_intact() {
         let second = "00bcf1a0503cacce3afe1fc3ba1b2e8710b41a424cf1137de3ccd05906bccfdc";
         let output = format!(
-            "{DIGEST}  /vault/Apps/User/Some App/App.shift\n{second}  /vault/Device/Messages.shift\n"
+            "{DIGEST}  /vault/Apps/User/Some App/App.vault\n{second}  /vault/Device/Messages.vault\n"
         );
         let pairs = parse_sha256sum_lines(&output);
         assert_eq!(pairs.len(), 2);
         // A label with a space in it must not be split into two paths.
-        assert_eq!(pairs[0].0, "/vault/Apps/User/Some App/App.shift");
+        assert_eq!(pairs[0].0, "/vault/Apps/User/Some App/App.vault");
         assert_eq!(pairs[0].1, DIGEST);
-        assert_eq!(pairs[1].0, "/vault/Device/Messages.shift");
+        assert_eq!(pairs[1].0, "/vault/Device/Messages.vault");
         // Binary-mode separator.
         assert_eq!(
-            parse_sha256sum_lines(&format!("{DIGEST} *Data.shift\n"))[0].0,
-            "Data.shift"
+            parse_sha256sum_lines(&format!("{DIGEST} *Data.vault\n"))[0].0,
+            "Data.vault"
         );
         // A failed read prints a diagnostic on stderr and no line here, so the
         // file is simply absent from the map.
@@ -418,8 +467,8 @@ mod tests {
     #[test]
     fn sidecar_paths_sit_next_to_their_archive() {
         assert_eq!(
-            sidecar_for(Path::new("/vault/Device/Messages.shift")),
-            PathBuf::from("/vault/Device/Messages.shift.sha256")
+            sidecar_for(Path::new("/vault/Device/Messages.vault")),
+            PathBuf::from("/vault/Device/Messages.vault.sha256")
         );
         // The partition images already use this suffix, so one rule covers both.
         assert_eq!(

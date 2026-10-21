@@ -19,6 +19,7 @@ import androidx.core.net.toUri
 import com.phoenix.droidvault.models.DeviceArchiveInfo
 import com.phoenix.droidvault.models.DeviceArchiveReader
 import com.phoenix.droidvault.models.DeviceDataItem
+import com.phoenix.droidvault.models.VaultArchive
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -128,7 +129,12 @@ object DeviceManager {
         val cmd = buildString {
             append("stat -c '%n %s %Y'")
             for (item in DeviceDataItem.entries) {
-                append(' ').append(ShellQuote.q("$deviceDir/${item.archiveFile}"))
+                // Both names: an archive written before the extension moved is
+                // still this item's archive, and `stat` is silent for the one
+                // that is not there.
+                for (name in VaultArchive.names(item.archiveBase)) {
+                    append(' ').append(ShellQuote.q("$deviceDir/$name"))
+                }
             }
             append(" 2>/dev/null; echo ").append(SHELL_CANARY)
         }
@@ -143,6 +149,55 @@ object DeviceManager {
     }
 
     /**
+     * The device archive that is actually on disk, for a base name.
+     *
+     * The extension moved from `*.shift` to `*.vault`, and an archive written
+     * under the old name is still this item's archive — so the name is
+     * RESOLVED, never assumed: the new name if it is there, the old one if
+     * that is what is there, and `null` when neither is.
+     *
+     * `null` matters. "No archive" and "the archive under the other name" must
+     * not read the same way: the first is an answer the user acts on (there
+     * is nothing to restore), the second is the same archive as ever.
+     *
+     * One fork, both names probed, and every candidate path quoted — a vault
+     * folder is the user's own name for a place on their card, and it may
+     * contain spaces.
+     */
+    fun resolveDeviceArchive(deviceDir: String, base: String): String? {
+        val candidates = VaultArchive.names(base).map { "$deviceDir/$it" }
+        val quoted = candidates.joinToString(" ") { ShellQuote.q(it) }
+        val cmd = "for f in " + quoted +
+            "; do [ -f \"\$f\" ] && echo \"\$f\" && break; done"
+        val found = Shell.cmd(cmd).exec().out.firstOrNull()?.trim()
+        return found?.takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * The device archive names that are on disk, by base name.
+     *
+     * The extension moved from `*.shift` to `*.vault`, and an archive written
+     * under the old name is still this item's archive — so the name is
+     * RESOLVED here, once, and every reader uses the result.
+     */
+    private fun resolveDeviceArchiveNames(deviceDir: String): Map<String, String> {
+        val present = try {
+            Shell.cmd("ls -1 ${ShellQuote.q(deviceDir)} 2>/dev/null").exec().out
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toSet()
+        } catch (_: Exception) {
+            emptySet()
+        }
+        return DeviceDataItem.entries.associate { item ->
+            item.archiveBase to (
+                VaultArchive.names(item.archiveBase).firstOrNull { present.contains(it) }
+                    ?: VaultArchive.name(item.archiveBase)
+                )
+        }
+    }
+
+    /**
      * Printed only if the command line above actually ran.
      *
      * A name no `stat -c '%n %s %Y'` line can produce, so it cannot be confused
@@ -153,7 +208,7 @@ object DeviceManager {
     private const val ZAPDOS_PATH = "/data/adb/DroidVault/zapdos"
 
     /**
-     * Folders recorded in the current Folders.shift archive (manifest read
+     * Folders recorded in the current Folders.vault archive (manifest read
      * through the root shell — java.io cannot see the backup dir under
      * scoped storage). Empty when the archive is absent or unreadable.
      * Powers the Migrate tab's Restore Folders dialog: it shows exactly what
@@ -161,10 +216,9 @@ object DeviceManager {
      */
     fun listArchivedFolders(savedPath: String): List<String> {
         ShellQuote.requireAbsPath(savedPath)
-        val src = "$savedPath/Device/${BackupConfigFolders.ARCHIVE_FILE}"
-        if (Shell.cmd("[ -f ${ShellQuote.q(src)} ] && echo y").exec().out.firstOrNull()?.trim() != "y") {
-            return emptyList()
-        }
+        // Resolved: the Folders archive under the name it actually has.
+        val src = resolveDeviceArchive("$savedPath/Device", DeviceDataItem.FOLDERS.archiveBase)
+            ?: return emptyList()
         val res = Shell.cmd(
             "${ShellQuote.q(ZAPDOS_PATH)} -d -q -c ${ShellQuote.q(src)} | tar -xO -f - ${ShellQuote.q(BackupConfigFolders.MANIFEST_NAME)} 2>/dev/null"
         ).exec()
@@ -172,7 +226,7 @@ object DeviceManager {
     }
 
     /**
-     * Remove the given folders from the on-disk Folders.shift archive by
+     * Remove the given folders from the on-disk Folders.vault archive by
      * REBUILDING it without the selected entries. Each folder keeps its
      * F<index> prefix (positions in the ORIGINAL manifest), and the manifest
      * travelling inside the archive is rewritten without the removed folders
@@ -195,10 +249,9 @@ object DeviceManager {
         cacheDir: String,
     ): List<String>? {
         ShellQuote.requireAbsPath(savedPath)
-        val src = "$savedPath/Device/${BackupConfigFolders.ARCHIVE_FILE}"
-        if (Shell.cmd("[ -f ${ShellQuote.q(src)} ] && echo y").exec().out.firstOrNull()?.trim() != "y") {
-            return null
-        }
+        // Resolved: the Folders archive under the name it actually has.
+        val src = resolveDeviceArchive("$savedPath/Device", DeviceDataItem.FOLDERS.archiveBase)
+            ?: return null
         val removeSet = BackupConfigFolders.sanitize(removePaths).toSet()
         if (removeSet.isEmpty()) return null
         val manifest = listArchivedFolders(savedPath)
@@ -372,7 +425,22 @@ object DeviceManager {
         }
     }
 
-    private fun importVcf(context: Context, vcfFile: File, updateProgress: (Int) -> Unit) {
+    /**
+     * Import a vCard file, and report what could not be written.
+     *
+     * Returns the number of contacts that were written. The old version
+     * swallowed every exception into a `printStackTrace()` — a stack trace on
+     * the logcat nobody reads, and an item the verdict recorded as a SUCCESS
+     * because nothing ever said otherwise. A provider that refuses a batch
+     * throws, and that is a failed restore, not a detail.
+     */
+    private fun importVcf(
+        context: Context,
+        vcfFile: File,
+        onFailure: (String) -> Unit,
+        updateProgress: (Int) -> Unit
+    ): Int {
+        var written = 0
         try {
             val ops = ArrayList<ContentProviderOperation>()
             val unfoldedLines = mutableListOf<String>()
@@ -391,6 +459,9 @@ object DeviceManager {
             val phones = mutableListOf<String>()
             var photo: ByteArray? = null
             val total = unfoldedLines.size
+            // Contacts seen, so a partial import can say how many of them did
+            // not land. The old code only knew whether the batch call threw.
+            var cards = 0
             unfoldedLines.forEachIndexed { i, line ->
                 when {
                     line.startsWith("BEGIN:VCARD", true) -> {
@@ -434,6 +505,7 @@ object DeviceManager {
 
                     line.startsWith("END:VCARD", true) -> {
                         if (!name.isNullOrEmpty() || phones.isNotEmpty()) {
+                            cards++
                             val rIdx = ops.size
                             ops.add(
                                 ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
@@ -487,21 +559,28 @@ object DeviceManager {
                             }
                         }
                         if (ops.size > 100) {
+                            val before = cards
                             context.contentResolver.applyBatch(
                                 ContactsContract.AUTHORITY,
                                 ops
-                            ); ops.clear()
+                            ); written += cards - before; ops.clear()
                         }
                     }
                 }
                 if (i % 50 == 0 && total > 0) updateProgress(i * 100 / total)
             }
-            if (ops.isNotEmpty()) context.contentResolver.applyBatch(
-                ContactsContract.AUTHORITY,
-                ops
-            )
+            if (ops.isNotEmpty()) {
+                val before = cards
+                context.contentResolver.applyBatch(
+                    ContactsContract.AUTHORITY,
+                    ops
+                ); written += cards - before
+            }
+            return written
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("DeviceManager", "Failed to import contacts", e)
+            onFailure("contacts could not be written: ${e.message}")
+            return written
         }
     }
 
@@ -568,9 +647,16 @@ object DeviceManager {
      * it. Without this, every restore re-inserted the whole archive — each
      * restore→backup cycle doubled the data (field-verified: 11,341 rows
      * where ~300 belong, restore counter climbing into the thousands).
+     *
+     * ONE implementation, shared with the reader that builds the store's side
+     * of the comparison ([SmsViaRoot.signature]). Two copies of this rule
+     * drift, and the drift is invisible: the dedupe and the read-back have to
+     * agree, and the normalising of the body is what makes a message whose
+     * archived body ended in a newline compare equal to the copy the store
+     * holds without one.
      */
     private fun smsSignature(address: Any?, date: Any?, body: Any?): String =
-        "${address ?: ""}|${date ?: ""}|${body ?: ""}"
+        SmsViaRoot.signature(address, date, body)
 
     /** Existing-signature set for the SMS store (one read, whole table). */
     private fun existingSmsSignatures(context: Context): MutableSet<String> {
@@ -1041,7 +1127,7 @@ object DeviceManager {
      *
      * The *values* in [forceInsertPart] / [forceInsertHeader] are escaped with
      * the `'\''` idiom and cannot break out, but the KEYS were interpolated
-     * raw. Keys arrive from JSON object names inside a `Messages.shift`
+     * raw. Keys arrive from JSON object names inside a `Messages.vault`
      * archive, so a crafted vault put e.g. `x; touch /data/local/tmp/pwn; echo y`
      * straight into a root command. Content-provider column names are always
      * `[a-z_][a-z0-9_]*`, so an allowlist regex loses nothing real.
@@ -1499,11 +1585,31 @@ object DeviceManager {
         type: Any?
     ): String = "$number|$date|$duration|$type"
 
-    private fun restoreCallLogs(context: Context, jsonFile: File, onProgress: (String) -> Unit) {
+    /**
+     * Restore the call log, and report what could not be written.
+     *
+     * Two rules make the number honest. The provider's own insert count is
+     * read back out of the store afterwards, because a provider that accepted
+     * a row it then dropped reports success for it — the same lie the Messages
+     * path stopped believing. And an exception here used to end the item in a
+     * progress line ("Error: ...") that no verdict ever read, so a call log
+     * that could not be written was recorded as a SUCCESS on both tabs.
+     */
+    private fun restoreCallLogs(
+        context: Context,
+        jsonFile: File,
+        onFailure: (String) -> Unit,
+        onProgress: (String) -> Unit
+    ) {
         if (!jsonFile.exists()) return
         val validCols = getValidColumns(context, CallLog.Calls.CONTENT_URI)
         var count = 0
         var dupes = 0
+        var attempted = 0
+        // Signatures of the rows this run decided to write, so the store can be
+        // read back afterwards: the provider's own count claims success for
+        // rows it did not keep.
+        val staged = HashSet<String>()
         // Idempotent restore: same (number, date, duration, type) is the same
         // call. Blind re-inserts made every restore→backup cycle multiply the
         // call log (field-verified: archive grew 6.5 KB → 59 KB in a day).
@@ -1541,6 +1647,8 @@ object DeviceManager {
                         dupes++
                         continue
                     }
+                    attempted++
+                    staged.add(sig)
                     batch.add(values)
                     if (batch.size >= 50) {
                         count += flushBatch(
@@ -1557,13 +1665,49 @@ object DeviceManager {
                     batch
                 )
             }
+            // Ask the store, not the provider. A row the provider accepted and
+            // then refused still counts as written in its own answer.
+            val notStored = countCallsNotStored(context, staged)
+            if (notStored >= 0) count = attempted - notStored
+            val failed = attempted - count
             onProgress(
-                if (dupes > 0) "Restored $count Calls ($dupes duplicates skipped)."
-                else "Restored $count Calls."
+                when {
+                    failed > 0 -> "Restored $count Calls ($dupes duplicates skipped, $failed failed)."
+                    dupes > 0 -> "Restored $count Calls ($dupes duplicates skipped)."
+                    else -> "Restored $count Calls."
+                }
             )
+            // Partial is still a failure of this item: the store does not hold
+            // every entry the archive asked for, and both tabs must say so.
+            if (failed > 0) {
+                onFailure("$failed of $attempted call log entries could not be written")
+            }
         } catch (e: Exception) {
+            Log.e("DeviceManager", "Failed to restore call logs", e)
             onProgress("Error: ${e.message}")
+            onFailure("call log could not be written: ${e.message}")
         }
+    }
+
+    /**
+     * How many of the rows this run wrote the call log does not hold.
+     *
+     * -1 when that cannot be determined: a store that could not be read is not
+     * evidence of a failed write, and inventing failures out of a failed read
+     * is its own bug. The same rule the Messages path follows.
+     */
+    private fun countCallsNotStored(context: Context, staged: Set<String>): Int {
+        if (staged.isEmpty()) return 0
+        repeat(VERIFY_ATTEMPTS) { attempt ->
+            val present = existingCallSignatures(context)
+            val missing = staged.count { it !in present }
+            if (missing == 0 || attempt == VERIFY_ATTEMPTS - 1) return missing
+            try {
+                Thread.sleep(400)
+            } catch (_: InterruptedException) {
+            }
+        }
+        return -1
     }
 
     @Suppress("SameParameterValue")
@@ -1625,6 +1769,19 @@ object DeviceManager {
         ShellQuote.requireAbsPath(savedPath)
         val pkg = context.packageName
         val backupDir = "$savedPath/Device"
+        // The device archives that are actually there, resolved ONCE.
+        //
+        // An archive written before the extension moved is still this item's
+        // archive, so the name is resolved and never assumed: the new name is
+        // preferred, the old one is the fallback. One listing, not a probe per
+        // item — the restore already forks per item, and this keeps the
+        // resolution out of the extraction path.
+        val deviceArchiveNames = resolveDeviceArchiveNames(backupDir)
+
+        /** The archive path for a base name, whichever extension it carries. */
+        fun deviceArchivePath(base: String): String =
+            "$backupDir/${deviceArchiveNames[base] ?: VaultArchive.name(base)}"
+
         val cacheDir = context.cacheDir.absolutePath
         val zapdosPath = "/data/adb/DroidVault/zapdos"
         // The app's own uid, used as the `--owner`/`--group` for every root-side
@@ -1638,7 +1795,7 @@ object DeviceManager {
         ); threadIdCache.clear(); Shell.cmd("mkdir -p ${ShellQuote.q(backupDir)}").exec()
         // Reap staging files a killed run left in the vault.
         //
-        // Every archive here is written to `<name>.shift.tmp-<nanos>` and
+        // Every archive here is written to `<name>.vault.tmp-<nanos>` and
         // renamed over the live one, so a cancelled or crashed backup leaves
         // that temp file behind — and unlike the export's staging, these live
         // in the VAULT, which nothing ever cleans. They were therefore carried
@@ -1754,13 +1911,13 @@ object DeviceManager {
                         // NOTHING. An empty tar still yields a valid-looking
                         // archive (zapdos exits 0 on empty input, verified) and
                         // would overwrite a good one — report instead.
-                        onItemFailure?.invoke("Calls", "call log could not be read (CallLogs.shift not written)")
+                        onItemFailure?.invoke("Calls", "call log could not be read (CallLogs.vault not written)")
                     } else {
                         notify(
                             "Compressing Calls...",
                             80
                         )
-                        packArchive(cacheDir, zapdosPath, "calls.json", "$backupDir/CallLogs.shift", "Calls", onItemFailure)
+                        packArchive(cacheDir, zapdosPath, "calls.json", "$backupDir/${VaultArchive.name("CallLogs")}", "Calls", onItemFailure)
                     }
                     callsJ.delete(); currentItemIndex++
                 }
@@ -1794,7 +1951,7 @@ object DeviceManager {
                             "Compressing Contacts...",
                             80
                         )
-                        packArchive(cacheDir, zapdosPath, "Contacts.vcf", "$backupDir/Contacts.shift", "Contacts", onItemFailure)
+                        packArchive(cacheDir, zapdosPath, "Contacts.vcf", "$backupDir/${VaultArchive.name("Contacts")}", "Contacts", onItemFailure)
                         vcf.delete()
                     }
                     currentItemIndex++
@@ -1818,11 +1975,11 @@ object DeviceManager {
                             "Compressing Wi-Fi...",
                             80
                         )
-                        packArchive(cacheDir, zapdosPath, "Wi-Fi", "$backupDir/Wi-Fi.shift", "Wi-Fi", onItemFailure)
+                        packArchive(cacheDir, zapdosPath, "Wi-Fi", "$backupDir/${VaultArchive.name("Wi-Fi")}", "Wi-Fi", onItemFailure)
                     } else {
                         onItemFailure?.invoke(
                             "Wi-Fi",
-                            "no saved networks were read (Wi-Fi.shift not written)"
+                            "no saved networks were read (Wi-Fi.vault not written)"
                         )
                     }
                     rmRfCacheSubdir(cacheDir, "Wi-Fi"); currentItemIndex++
@@ -1841,11 +1998,11 @@ object DeviceManager {
                             "Compressing Wallpaper...",
                             80
                         )
-                        packArchive(cacheDir, zapdosPath, "Wallpaper", "$backupDir/Wallpaper.shift", "Wallpaper", onItemFailure)
+                        packArchive(cacheDir, zapdosPath, "Wallpaper", "$backupDir/${VaultArchive.name("Wallpaper")}", "Wallpaper", onItemFailure)
                     } else {
                         onItemFailure?.invoke(
                             "Wallpaper",
-                            "no wallpaper was read (Wallpaper.shift not written)"
+                            "no wallpaper was read (Wallpaper.vault not written)"
                         )
                     }
                     rmRfCacheSubdir(cacheDir, "Wallpaper"); currentItemIndex++
@@ -1863,11 +2020,11 @@ object DeviceManager {
                             "Compressing Bluetooth...",
                             80
                         )
-                        packArchive(cacheDir, zapdosPath, "Bluetooth", "$backupDir/Bluetooth.shift", "Bluetooth", onItemFailure)
+                        packArchive(cacheDir, zapdosPath, "Bluetooth", "$backupDir/${VaultArchive.name("Bluetooth")}", "Bluetooth", onItemFailure)
                     } else {
                         onItemFailure?.invoke(
                             "Bluetooth",
-                            "no paired devices were read (Bluetooth.shift not written)"
+                            "no paired devices were read (Bluetooth.vault not written)"
                         )
                     }
                     rmRfCacheSubdir(cacheDir, "Bluetooth"); currentItemIndex++
@@ -1929,7 +2086,7 @@ object DeviceManager {
                     packArchive(
                         cacheDir, zapdosPath,
                         "--owner=0 --group=0 messages.json mms_parts",
-                        "$backupDir/Messages.shift", "Messages", onItemFailure
+                        "$backupDir/${VaultArchive.name("Messages")}", "Messages", onItemFailure
                     )
                     msgJ.delete(); partsD.deleteRecursively(); currentItemIndex++
                     smsBackupError?.let { onItemFailure?.invoke("Messages", it) }
@@ -1944,12 +2101,16 @@ object DeviceManager {
                     // Drop leftovers from a run that died mid-extract: a stale
                     // file would satisfy the exists() check below AND be
                     // restored as if it came from THIS archive.
-                    rmRfCacheSubdir(cacheDir, "calls.json"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/CallLogs.shift")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
+                    rmRfCacheSubdir(cacheDir, "calls.json"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/${VaultArchive.name("CallLogs")}")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
                         .exec()
                     reclaimCacheDir(context, "calls.json")
                     val callsJ = File(context.cacheDir, "calls.json")
                     if (callsJ.exists()) {
-                        restoreCallLogs(context, callsJ) { msg -> notify(msg, 50) }
+                        restoreCallLogs(
+                            context,
+                            callsJ,
+                            onFailure = { reason -> onItemFailure?.invoke("Calls", reason) }
+                        ) { msg -> notify(msg, 50) }
                     } else {
                         // Nothing extracted (archive missing or unreadable):
                         // report it — otherwise this run reports a clean
@@ -1966,19 +2127,34 @@ object DeviceManager {
                         "Extracting Contacts...",
                         0
                     )
-                    rmRfCacheSubdir(cacheDir, "Contacts.vcf"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/Contacts.shift")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
+                    rmRfCacheSubdir(cacheDir, "Contacts.vcf"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/${VaultArchive.name("Contacts")}")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
                         .exec()
                     reclaimCacheDir(context, "Contacts.vcf")
                     val vcf = File(context.cacheDir, "Contacts.vcf")
                     if (vcf.exists()) {
-                        importVcf(context, vcf) { prog ->
+                        val written = importVcf(
+                            context,
+                            vcf,
+                            onFailure = { reason -> onItemFailure?.invoke("Contacts", reason) }
+                        ) { prog ->
                             notify(
                                 "Importing Contacts...",
                                 prog
                             )
-                        }; vcf.delete()
+                        }
+                        // The provider accepted the batch and the contacts are
+                        // not on the device: the import said nothing. A file
+                        // that held contacts and produced none is a failure,
+                        // not an empty address book.
+                        if (written == 0 && vcf.length() > 0) {
+                            onItemFailure?.invoke(
+                                "Contacts",
+                                "no contacts could be written"
+                            )
+                        }
+                        vcf.delete()
                     } else {
-                        // A Contacts.shift always carries Contacts.vcf (the
+                        // A Contacts.vault always carries Contacts.vcf (the
                         // backup only packs when it exists), so a missing one
                         // means the extraction produced nothing.
                         onItemFailure?.invoke(
@@ -1993,7 +2169,7 @@ object DeviceManager {
                         "Extracting Wi-Fi...",
                         0
                     )
-                    rmRfCacheSubdir(cacheDir, "Wi-Fi"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/Wi-Fi.shift")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
+                    rmRfCacheSubdir(cacheDir, "Wi-Fi"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/${VaultArchive.name("Wi-Fi")}")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
                         .exec(); reclaimCacheDir(context, "Wi-Fi")
                     if (!File(cacheDir, "Wi-Fi").exists()) {
                         // The shell "succeeds" on an empty dir; only the
@@ -2006,15 +2182,26 @@ object DeviceManager {
                     notify(
                         "Applying Wi-Fi...",
                         50
-                    ); Shell.cmd("sh /data/adb/DroidVault/DroidVault.sh --restore-wifi ${ShellQuote.q("$cacheDir/Wi-Fi")}")
-                        .exec(); rmRfCacheSubdir(cacheDir, "Wi-Fi"); currentItemIndex++
+                    )
+                    // The engine's exit code is the verdict. It counts what it
+                    // added, what it could not classify and what the device
+                    // refused, and exits non-zero when a network from the
+                    // archive is not on the phone now. The old call threw the
+                    // exit code away, so a Wi-Fi restore that added NOTHING
+                    // was recorded as a success on both tabs.
+                    applyEngineStep(
+                        "Wi-Fi",
+                        "sh /data/adb/DroidVault/DroidVault.sh --restore-wifi ${ShellQuote.q("$cacheDir/Wi-Fi")}",
+                        onItemFailure
+                    )
+                    rmRfCacheSubdir(cacheDir, "Wi-Fi"); currentItemIndex++
                 }
                 if (doWallpaper) {
                     notify(
                         "Extracting Wallpaper...",
                         0
                     )
-                    rmRfCacheSubdir(cacheDir, "Wallpaper"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/Wallpaper.shift")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
+                    rmRfCacheSubdir(cacheDir, "Wallpaper"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/${VaultArchive.name("Wallpaper")}")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
                         .exec()
                     // Wallpaper files are opened through java.io
                     // (WallpaperManager.setStream) — owner + SELinux repair is
@@ -2029,34 +2216,62 @@ object DeviceManager {
                     notify(
                         "Applying Wallpaper...",
                         50
-                    ); Shell.cmd("sh /data/adb/DroidVault/DroidVault.sh --restore-wallpaper ${ShellQuote.q("$cacheDir/Wallpaper")}")
-                        .exec()
-                    try {
-                        val wm = WallpaperManager.getInstance(context)
-                        val wp = File(cacheDir, "Wallpaper/wallpaper"); if (wp.exists()) {
-                            FileInputStream(wp).use {
-                                wm.setStream(
-                                    it,
-                                    null,
-                                    true,
-                                    WallpaperManager.FLAG_SYSTEM
+                    )
+                    // Two steps, and both have to land: the engine places the
+                    // files, the app hands them to the wallpaper service. The
+                    // engine's exit code says whether the files were placed;
+                    // the `setStream` call says whether the service took them.
+                    // The `catch` that used to swallow the exception made a
+                    // wallpaper that never appeared a SUCCESS.
+                    val wallpaperPlaced = applyEngineStep(
+                        "Wallpaper",
+                        "sh /data/adb/DroidVault/DroidVault.sh --restore-wallpaper ${ShellQuote.q("$cacheDir/Wallpaper")}",
+                        onItemFailure
+                    )
+                    if (wallpaperPlaced) {
+                        try {
+                            val wm = WallpaperManager.getInstance(context)
+                            val wp = File(cacheDir, "Wallpaper/wallpaper")
+                            var applied = 0
+                            if (wp.exists()) {
+                                FileInputStream(wp).use {
+                                    wm.setStream(
+                                        it,
+                                        null,
+                                        true,
+                                        WallpaperManager.FLAG_SYSTEM
+                                    )
+                                }
+                                applied++
+                            }
+                            val lk = File(cacheDir, "Wallpaper/wallpaper_lock")
+                            val lko = File(cacheDir, "Wallpaper/wallpaper_lock_orig")
+                            val fl =
+                                if (lk.exists()) lk else if (lko.exists()) lko else null
+                            if (fl != null) {
+                                FileInputStream(fl).use {
+                                    wm.setStream(
+                                        it,
+                                        null,
+                                        true,
+                                        WallpaperManager.FLAG_LOCK
+                                    )
+                                }
+                                applied++
+                            }
+                            if (applied == 0) {
+                                onItemFailure?.invoke(
+                                    "Wallpaper",
+                                    "the wallpaper archive held no image to apply"
                                 )
                             }
+                        } catch (e: Exception) {
+                            Log.e("DeviceManager", "Failed to apply the wallpaper", e)
+                            onItemFailure?.invoke(
+                                "Wallpaper",
+                                "the wallpaper could not be applied: ${e.message}"
+                            )
                         }
-                        val lk = File(cacheDir, "Wallpaper/wallpaper_lock")
-                        val lko = File(cacheDir, "Wallpaper/wallpaper_lock_orig")
-                        val fl =
-                            if (lk.exists()) lk else if (lko.exists()) lko else null; if (fl != null) {
-                            FileInputStream(fl).use {
-                                wm.setStream(
-                                    it,
-                                    null,
-                                    true,
-                                    WallpaperManager.FLAG_LOCK
-                                )
-                            }
-                        }
-                    } catch (_: Exception) {
                     }
                     rmRfCacheSubdir(cacheDir, "Wallpaper"); currentItemIndex++
                 }
@@ -2065,7 +2280,7 @@ object DeviceManager {
                         "Extracting Bluetooth...",
                         0
                     )
-                    rmRfCacheSubdir(cacheDir, "Bluetooth"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/Bluetooth.shift")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null").exec(); reclaimCacheDir(context, "Bluetooth")
+                    rmRfCacheSubdir(cacheDir, "Bluetooth"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/${VaultArchive.name("Bluetooth")}")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null").exec(); reclaimCacheDir(context, "Bluetooth")
                     if (!File(cacheDir, "Bluetooth").exists()) {
                         onItemFailure?.invoke(
                             "Bluetooth",
@@ -2075,7 +2290,16 @@ object DeviceManager {
                     notify(
                         "Applying Bluetooth...",
                         50
-                    ); Shell.cmd("sh /data/adb/DroidVault/DroidVault.sh --restore-bt ${ShellQuote.q("$cacheDir/Bluetooth")}").exec(); rmRfCacheSubdir(cacheDir, "Bluetooth"); currentItemIndex++
+                    )
+                    // The pairing file is the only copy of the user's paired
+                    // devices; the engine's exit code says whether it was
+                    // placed, and the old call threw that away.
+                    applyEngineStep(
+                        "Bluetooth",
+                        "sh /data/adb/DroidVault/DroidVault.sh --restore-bt ${ShellQuote.q("$cacheDir/Bluetooth")}",
+                        onItemFailure
+                    )
+                    rmRfCacheSubdir(cacheDir, "Bluetooth"); currentItemIndex++
                 }
                 if (doFolders) {
                     restoreFolders(
@@ -2102,7 +2326,7 @@ object DeviceManager {
                         0
                     )
                     rmRfCacheSubdir(cacheDir, "messages.json")
-                    rmRfCacheSubdir(cacheDir, "mms_parts"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/Messages.shift")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
+                    rmRfCacheSubdir(cacheDir, "mms_parts"); Shell.cmd("${ShellQuote.q(zapdosPath)} -d -q -c ${ShellQuote.q("$backupDir/${VaultArchive.name("Messages")}")} | tar -xf - -C ${ShellQuote.q(cacheDir)} --owner=$appUid --group=$appUid 2>/dev/null")
                         .exec()
                     // Owner + SELinux repair for archives taken before the
                     // --owner=0 change, and for ROMs where extraction does not
@@ -2180,6 +2404,43 @@ object DeviceManager {
     object DeviceDataCancelled : Exception("cancelled by user")
 
     /**
+     * Run one of the engine's device-restore commands and report what it could
+     * not do.
+     *
+     * The engine's own answer is the only authority here, and it is the exit
+     * code. A command that exits 0 after doing nothing is a success the app
+     * must not report; a command that exits non-zero prints
+     * `ACTION:ERROR|MSG:…`, and that message is the reason — it carries the
+     * counts ("2 of 3 saved networks could not be restored") rather than a
+     * generic "failed", so the user is told WHAT did not land.
+     *
+     * ONE implementation, both tabs: the Migrate tab and the automation runner
+     * call the same [runOperation], and a rule that exists on only one of them
+     * is the rule the other one gets wrong silently.
+     *
+     * Returns true when the step succeeded.
+     */
+    private fun applyEngineStep(
+        label: String,
+        command: String,
+        onItemFailure: ((String, String) -> Unit)?
+    ): Boolean {
+        val result = Shell.cmd(command).exec()
+        if (result.isSuccess) {
+            return true
+        }
+        val reason = result.out
+            .firstOrNull { it.startsWith("ACTION:ERROR|") }
+            ?.substringAfter("MSG:")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?: "the engine could not apply the $label archive (exit ${result.code})"
+        DroidVaultLogger.w("DeviceData", "$label restore failed: $reason")
+        onItemFailure?.invoke(label, reason)
+        return false
+    }
+
+    /**
      * The run was refused BEFORE any work happened (another run holds the
      * gate, or the engine could not be brought up to date).
      *
@@ -2192,7 +2453,7 @@ object DeviceManager {
     class DeviceDataRefused(val title: String, detail: String) : Exception(detail)
 
     /**
-     * Delete leftover `<name>.shift.tmp-<nanos>` files in the vault's device
+     * Delete leftover `<name>.vault.tmp-<nanos>` files in the vault's device
      * folder, and the automation state file's, if any.
      *
      * Only files matching that exact shape, so a real archive or a partial
@@ -2209,7 +2470,7 @@ object DeviceManager {
     }
 
     /**
-     * Pack one staged cache entry into its `.shift` archive and report a write
+     * Pack one staged cache entry into its `.vault` archive and report a write
      * failure to BOTH callers through [onItemFailure].
      *
      * The pipeline exits with zapdos's status, so non-zero means nothing was
@@ -2273,7 +2534,7 @@ object DeviceManager {
         // Record the digest at the moment the archive is promoted. The engine
         // does this for the archives it writes (its `checksum` module), and a
         // device archive is frequently the only copy of what it holds — a
-        // changed or truncated Messages.shift must be visible rather than
+        // changed or truncated Messages.vault must be visible rather than
         // discovered at restore time. Best-effort: the archive is written, so
         // this cannot fail the part.
         VaultDigest.record(dest)
@@ -2281,7 +2542,7 @@ object DeviceManager {
 
     /**
      * Backup user-picked folders into one zapdos-compressed tar at
-     * `<savedPath>/Device/Folders.shift`.
+     * `<savedPath>/Device/Folders.vault`.
      *
      * Root shell (su) reads every path — including Android/data and
      * Android/obb under any user's storage,
@@ -2375,7 +2636,7 @@ object DeviceManager {
         // zapdos with `-o` straight at the live path truncates the good archive
         // as it streams (-f has discarded the original by then), so a tar that
         // died midway — a vanished source, ENOSPC, a cancelled run — left a
-        // TRUNCATED Folders.shift where a valid one used to be, and the check
+        // TRUNCATED Folders.vault where a valid one used to be, and the check
         // below only asked whether a file was there. This is the same defect
         // S-06 fixed for the app archives.
         val tmp = "$dst.tmp-${System.nanoTime()}"
@@ -2405,7 +2666,7 @@ object DeviceManager {
     }
 
     /**
-     * Restore folders from Folders.shift using the manifest inside the
+     * Restore folders from Folders.vault using the manifest inside the
      * archive. Each folder is extracted to a staging dir and copied back to
      * its recorded absolute path (created if missing, contents merged into
      * the existing dir when present).
@@ -2423,8 +2684,9 @@ object DeviceManager {
         notify: (String, Int) -> Unit,
     ) {
         val selectedPaths = BackupConfigFolders.sanitize(folderPaths).toSet()
-        val src = "$backupDir/${BackupConfigFolders.ARCHIVE_FILE}"
-        if (Shell.cmd("[ -f ${ShellQuote.q(src)} ] && echo y").exec().out.firstOrNull()?.trim() != "y") {
+        // Resolved: the Folders archive under the name it actually has.
+        val src = resolveDeviceArchive(backupDir, DeviceDataItem.FOLDERS.archiveBase)
+        if (src == null) {
             notify("No Folders archive in the backup folder", 100)
             onFailure("no ${BackupConfigFolders.ARCHIVE_FILE} in the backup folder")
             return

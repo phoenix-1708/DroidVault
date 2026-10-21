@@ -987,9 +987,9 @@ mod tests {
         let staging = base.join("staging").join("Apps").join("User").join("Demo");
         let dest = base.join("vault").join("Apps").join("User").join("Demo");
         fs::create_dir_all(&staging).unwrap();
-        fs::write(staging.join("App.shift"), b"x").unwrap();
+        fs::write(staging.join("App.vault"), b"x").unwrap();
         fs::create_dir_all(&dest).unwrap();
-        fs::write(dest.join("App.shift"), b"old").unwrap();
+        fs::write(dest.join("App.vault"), b"old").unwrap();
         let state = place_app(
             &base.join("staging").join("Apps"),
             &base.join("vault").join("Apps"),
@@ -997,7 +997,7 @@ mod tests {
             true,
         );
         assert_eq!(state, PlaceState::Kept);
-        assert_eq!(fs::read(dest.join("App.shift")).unwrap(), b"old");
+        assert_eq!(fs::read(dest.join("App.vault")).unwrap(), b"old");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1010,7 +1010,7 @@ mod tests {
             .join("System")
             .join("Demo");
         fs::create_dir_all(&staging).unwrap();
-        fs::write(staging.join("App.shift"), b"new").unwrap();
+        fs::write(staging.join("App.vault"), b"new").unwrap();
         let state = place_app(
             &base.join("staging").join("Apps"),
             &base.join("vault").join("Apps"),
@@ -1032,7 +1032,7 @@ mod tests {
                     .join("Apps")
                     .join("System")
                     .join("Demo")
-                    .join("App.shift")
+                    .join("App.vault")
             )
             .unwrap(),
             b"new"

@@ -47,7 +47,6 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -73,6 +72,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -88,6 +88,7 @@ import coil.compose.AsyncImage
 import com.phoenix.droidvault.ui.theme.DvMotion
 import com.phoenix.droidvault.utils.AutomationRunner
 import com.phoenix.droidvault.utils.ProgressTracker
+import com.phoenix.droidvault.ui.components.DvButton
 
 /**
  * Live backup/restore progress screen (inspired by DataBackup's Processing
@@ -156,11 +157,14 @@ fun ProcessingScreen(
             }
         }
 
+        // The bar describes work IN FLIGHT. It used to be painted at 100% for
+        // Done (the full accent line that sat under "Completed" and "Completed
+        // with errors") and left INDETERMINATE — animating — for Failed, which
+        // reads as "still working" on a screen that says the run failed. Terminal
+        // states get no bar: the badge and the verdict are the whole message.
         val topPct = when (val s = state) {
             is ProgressState.Running -> if (s.overallPct <= 0) null else s.overallPct / 100f
-            is ProgressState.Done -> 1f
-            is ProgressState.Failed -> null
-            ProgressState.Idle -> null
+            else -> null
         }
         Box(
             Modifier
@@ -174,7 +178,7 @@ fun ProcessingScreen(
                     modifier = Modifier.fillMaxSize(),
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
                 )
-            } else {
+            } else if (state is ProgressState.Running) {
                 LinearProgressIndicator(
                     modifier = Modifier.fillMaxSize(),
                     trackColor = MaterialTheme.colorScheme.surfaceVariant,
@@ -204,7 +208,7 @@ fun ProcessingScreen(
                     .padding(horizontal = 24.dp, vertical = 12.dp),
             ) {
                 val isRunning = state is ProgressState.Running
-                Button(
+                DvButton(
                     onClick = {
                         when {
                             isRunning -> showCancelDialog = true
@@ -221,7 +225,10 @@ fun ProcessingScreen(
                             contentColor = MaterialTheme.colorScheme.onErrorContainer,
                         )
                     } else {
-                        ButtonDefaults.buttonColors()
+                        // The app's tonal plate, NOT Material's filled default:
+                        // the filled button is the loud one this app no longer
+                        // has (§2.108).
+                        com.phoenix.droidvault.ui.components.tonalButtonColors()
                     },
                 ) {
                     Text(if (isRunning) "Cancel operation" else "Finish")
@@ -276,6 +283,10 @@ private fun RunningBody(s: ProgressState.Running, modifier: Modifier = Modifier)
             nowMs = System.currentTimeMillis()
         }
     }
+    // Per RUN, keyed on the stamp that identifies one: the device phase of a
+    // mixed run preserves startedAtMs (same run, same estimate history), a new
+    // run gets a new one.
+    val eta = remember(s.startedAtMs) { com.phoenix.droidvault.models.EtaEstimator() }
     Column(modifier) {
         // Recently finished apps (backend order preserved = completion order).
         // Excludes the app under the ring — the hero already represents it.
@@ -302,7 +313,7 @@ private fun RunningBody(s: ProgressState.Running, modifier: Modifier = Modifier)
                 // in words, it is just true.
                 else -> "${s.processedCount} of ${s.totalCount} done"
             },
-            statsText = statsText(s, nowMs),
+            statsText = statsText(s, nowMs, eta),
             finishedApps = finishedApps,
         )
         Spacer(Modifier.height(12.dp))
@@ -317,7 +328,11 @@ private fun RunningBody(s: ProgressState.Running, modifier: Modifier = Modifier)
 }
 
 /** "Elapsed 2m 14s • 1.2 GB done • ~4m left" — measured, never invented. */
-private fun statsText(s: ProgressState.Running, nowMs: Long): String {
+private fun statsText(
+    s: ProgressState.Running,
+    nowMs: Long,
+    eta: com.phoenix.droidvault.models.EtaEstimator,
+): String {
     val elapsedSec = ((nowMs - s.startedAtMs) / 1000).coerceAtLeast(0)
     if (elapsedSec < 3) return ""
     val elapsed = formatDuration(elapsedSec)
@@ -333,18 +348,23 @@ private fun statsText(s: ProgressState.Running, nowMs: Long): String {
     // bytes — so "done" claims the phone wrote 38 GB in the 28 seconds it was
     // open. The fraction is true either way; only the wording was lying.
     if (doneKb > 0 && totalKb > 0) parts.add("${formatKb(doneKb)} of ${formatKb(totalKb)}")
-    if (totalKb > 0 && doneKb > 0 && s.overallPct in 1..99) {
-        val etaSec = (elapsedSec * (totalKb - doneKb) / doneKb)
-        // An estimate built from a frozen byte counter only ever grows — the
-        // screenshots caught "~51s left" climbing to "~1m 9s left" over half a
-        // minute of no progress. A number that moves the wrong way is worse than
-        // no number, because it reads as "this is going to take a while" when the
-        // run may in fact be nearly finished. Only shown when the remaining
-        // fraction is small enough for a whole-run rate to mean anything.
-        if (etaSec in 5..(6 * 3600) && doneKb * 4 >= totalKb) {
-            parts.add("~${formatDuration(etaSec)} left")
-        }
-    }
+    // ETA last. The estimate itself is [EtaEstimator]'s job: it reads a recent
+    // window and never renders a figure larger than one already shown, because
+    // the old whole-run average grew while a stalled part moved no bytes
+    // ("~51s left" climbing to "~1m 9s left" — §2.31). A number that moves
+    // the wrong way reads as the run going backwards.
+    //
+    // The RATE is taken from the bytes actually written, and the NUMERATOR is
+    // the bytes still to write. The run's own counter cannot serve either: it
+    // counts a part the engine skipped — nothing to install, nothing to copy —
+    // as done in full, so on an incremental run it jumps over bytes that were
+    // never written. Measured on the reference device: a restore of eight apps
+    // read "626.6 MB of 1.4 GB" four seconds in while the bytes still to
+    // write had barely moved. A rate taken from that counter says the run is
+    // nearly over while it is not.
+    val writtenKb = s.apps.sumOf { it.writtenKb }
+    val remainingKb = (totalKb - doneKb).coerceAtLeast(0)
+    eta.update(writtenKb, remainingKb, nowMs)?.let { parts.add("~${formatDuration(it)} left") }
     return parts.joinToString(" • ")
 }
 
@@ -497,6 +517,16 @@ private fun HeroSection(
     statsText: String = "",
     finishedApps: List<AppProgress> = emptyList(),
 ) {
+    // The ring is 168 dp. A portrait screen has room for it; a landscape one
+    // does not — the body gets ~294 dp there and the hero needs ~310, so the
+    // app's name was clipped away and the run's live state was unreadable on
+    // exactly the screen that shows it. Sized from the configuration rather
+    // than from a second layout, so PORTRAIT IS UNTOUCHED: the ring is the
+    // same 168 dp it has always been.
+    val configuration = LocalConfiguration.current
+    val landscape = configuration.screenWidthDp > configuration.screenHeightDp
+    val ringSize = if (landscape) 96.dp else 168.dp
+    val iconSize = if (landscape) 60.dp else 104.dp
     Column(
         Modifier
             .fillMaxWidth()
@@ -509,19 +539,19 @@ private fun HeroSection(
             SegmentedRing(
                 segments = segments.coerceAtLeast(1),
                 partProgress = app?.parts ?: emptyList(),
-                modifier = Modifier.size(168.dp),
+                modifier = Modifier.size(ringSize),
             )
             when {
                 app != null && app.iconPath != null -> AsyncImage(
                     model = app.iconPath,
                     contentDescription = app.label,
                     modifier = Modifier
-                        .size(104.dp)
+                        .size(iconSize)
                         .clip(CircleShape),
                 )
                 app != null && app.packageName.startsWith("device:") -> Box(
                     Modifier
-                        .size(104.dp)
+                        .size(iconSize)
                         .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -529,12 +559,12 @@ private fun HeroSection(
                         Icons.Default.Folder,
                         contentDescription = app.label,
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.size(44.dp),
+                        modifier = Modifier.size(iconSize * 0.42f),
                     )
                 }
                 app != null -> Box(
                     Modifier
-                        .size(104.dp)
+                        .size(iconSize)
                         .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -548,7 +578,7 @@ private fun HeroSection(
                     if (phase == RunPhase.FINALIZING) Icons.Default.Check else Icons.Default.Remove,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(64.dp),
+                    modifier = Modifier.size(if (landscape) 40.dp else 64.dp),
                 )
             }
         }
@@ -612,7 +642,13 @@ private fun HeroSection(
 @Composable
 private fun FinishedAppsStrip(apps: List<AppProgress>) {
     LazyRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        // Centred, not left-aligned. The Box above centres the LazyRow, but the
+        // LazyRow fills the width, so its ITEMS started at the left padding —
+        // and while only one app had finished the strip rendered as a lone
+        // 34 dp icon floating at the screen edge (the stray Call of Duty chip in
+        // the field screenshots). spacedBy + alignment centres the group and
+        // still scrolls once the icons outgrow the row.
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
         contentPadding = PaddingValues(horizontal = 24.dp),
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),

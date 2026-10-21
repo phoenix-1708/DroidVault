@@ -35,6 +35,16 @@ object BackupPlanner {
     const val SKIP_NO_BACKUP_ON_DEVICE = "no backup on device"
 
     /**
+     * The user excluded this app from the configuration by name.
+     *
+     * The per-app form of [SKIP_EXCLUDED_PREFIX]: the rule excludes a whole
+     * LABEL, this excludes one app the user picked out of one. It is a skip by
+     * design — the configuration did exactly what it was told — so it counts
+     * as one in [isByDesignSkip].
+     */
+    const val SKIP_EXCLUDED_BY_CONFIG = "excluded by this configuration"
+
+    /**
      * Pure aggregate-seam decision (unit-testable): is this plan skip "by
      * design" (app outside the config's scope, or explicitly excluded — the
      * run did exactly what the config asked) or a genuine shortfall the user
@@ -43,7 +53,9 @@ object BackupPlanner {
      * SUCCESS, not PARTIAL_SUCCESS.
      */
     fun isByDesignSkip(reason: String): Boolean =
-        reason == SKIP_NO_MATCHING_RULE || reason.startsWith(SKIP_EXCLUDED_PREFIX)
+        reason == SKIP_NO_MATCHING_RULE ||
+            reason.startsWith(SKIP_EXCLUDED_PREFIX) ||
+            reason == SKIP_EXCLUDED_BY_CONFIG
 
     fun plan(
         apps: List<PlannableApp>,
@@ -74,7 +86,14 @@ object BackupPlanner {
             configId = config.id,
             configName = config.name,
             dryRun = dryRun,
-            entries = entries
+            entries = entries,
+            // The device half of the configuration, so the plan describes the
+            // WHOLE run. A device-data configuration has no app entries, and
+            // a plan that could not say so would describe a run it knows
+            // nothing about.
+            deviceData = config.deviceData,
+            folderPaths = config.folderPaths,
+            coversApps = config.coversApps
         )
     }
 
@@ -87,6 +106,28 @@ object BackupPlanner {
         unavailableReason: (BackupComponent) -> String,
         onDisk: Set<Int>?
     ): PlannedApp {
+        // The user's own exclusion wins over EVERYTHING — over the rules, over
+        // the fallback, and over the "not installed" check below. It is the one
+        // decision in this file that is the user's, and it is the one the
+        // preview offers to undo.
+        //
+        // Checked FIRST, so an app the user excluded is excluded whether it is
+        // installed or not: an uninstalled app is a restore target, and a user
+        // who says "not this one" means it for both directions.
+        if (app.packageName in config.excludedPackages) {
+            return PlannedApp(
+                packageName = app.packageName,
+                label = app.label,
+                ruleId = null,
+                requested = emptySet(),
+                granted = emptySet(),
+                unavailable = emptySet(),
+                skipped = true,
+                skipReason = SKIP_EXCLUDED_BY_CONFIG,
+                error = ErrorCode.NONE,
+                excluded = true
+            )
+        }
         // BACKUP: an uninstalled app has nothing on the device to back up.
         // RESTORE: an uninstalled app is exactly the target (restore = install
         // from the backup folder, same as the Migrate tab's restore list).

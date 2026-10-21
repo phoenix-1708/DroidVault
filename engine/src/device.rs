@@ -5,15 +5,21 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
-fn copy_file(src: &Path, dst: &Path) {
-    let _ = status(
+/// Copy a file, and say whether it landed.
+///
+/// The return value exists for the RESTORE paths, which have to report what
+/// they could not do: a `cp` that failed leaves the destination holding the
+/// PREVIOUS wallpaper or pairing file, and a caller that treats that as success
+/// reports a restore that did not happen.
+fn copy_file(src: &Path, dst: &Path) -> bool {
+    status(
         "cp",
         [
             "-f",
             src.to_string_lossy().as_ref(),
             dst.to_string_lossy().as_ref(),
         ],
-    );
+    )
 }
 
 fn recreate_directory(path: &Path) {
@@ -219,10 +225,35 @@ fn decode_base64_if_needed(value: &str) -> Option<String> {
     }
 }
 
-pub fn restore_wifi(source: &str) {
+/// What a Wi-Fi restore actually did.
+///
+/// Counts, not a verdict: the caller decides what a count means. An archive
+/// with no networks is not a failure (there was nothing to restore), an
+/// archive whose networks were all refused or all unreadable is.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct WifiOutcome {
+    /// Networks the archive held.
+    pub found: usize,
+    /// Networks the device accepted.
+    pub added: usize,
+    /// Networks this build could not classify — fail CLOSED, never added as open.
+    pub skipped: usize,
+    /// Networks the device itself refused.
+    pub failed: usize,
+}
+
+impl WifiOutcome {
+    /// Networks the archive held that are not on the device now.
+    pub fn missing(&self) -> usize {
+        self.found.saturating_sub(self.added)
+    }
+}
+
+pub fn restore_wifi(source: &str) -> WifiOutcome {
+    let mut outcome = WifiOutcome::default();
     let file = Path::new(source).join("WifiConfigStore.xml");
     let Ok(xml) = fs::read_to_string(file) else {
-        return;
+        return outcome;
     };
     protocol::info("Enabling Wi-Fi for restore...");
     let _ = status("svc", ["wifi", "enable"]);
@@ -254,14 +285,27 @@ pub fn restore_wifi(source: &str) {
         let key_mgmt = xml_value(block, "AllowedKeyMgmt").unwrap_or_default();
         let security = classify_key_mgmt(&key_mgmt);
         count += 1;
+        outcome.found += 1;
         // SSIDs and passphrases contain private network details; emit only an index.
         protocol::info(&format!("Adding network {count}"));
         match security {
             Some(sec) if sec == "open" => {
-                let _ = status("cmd", ["wifi", "add-network", &ssid, "open"]);
+                if status("cmd", ["wifi", "add-network", &ssid, "open"]) {
+                    outcome.added += 1;
+                    ssids.push(ssid);
+                } else {
+                    outcome.failed += 1;
+                    protocol::info(&format!("Network {count} was refused by the device"));
+                }
             }
             Some(sec) => {
-                let _ = status("cmd", ["wifi", "add-network", &ssid, sec, &psk]);
+                if status("cmd", ["wifi", "add-network", &ssid, sec, &psk]) {
+                    outcome.added += 1;
+                    ssids.push(ssid);
+                } else {
+                    outcome.failed += 1;
+                    protocol::info(&format!("Network {count} was refused by the device"));
+                }
             }
             // Fail CLOSED. This used to fall through to `open`, which meant a
             // network whose key management this code could not read was added as
@@ -270,6 +314,7 @@ pub fn restore_wifi(source: &str) {
             // network we cannot classify is not a network to guess about — it is
             // a reason to skip it and say so.
             None => {
+                outcome.skipped += 1;
                 let detail = describe_key_mgmt(&key_mgmt);
                 protocol::info(&format!(
                     "Skipping network {count}: key management not understood ({detail}), \
@@ -278,7 +323,6 @@ pub fn restore_wifi(source: &str) {
                 continue;
             }
         }
-        ssids.push(ssid);
     }
     if !ssids.is_empty() {
         thread::sleep(Duration::from_secs(1));
@@ -287,6 +331,7 @@ pub fn restore_wifi(source: &str) {
         }
     }
     protocol::info("Wi-Fi restore done");
+    outcome
 }
 
 pub fn backup_wallpaper(destination: &str) {
@@ -299,15 +344,22 @@ pub fn backup_wallpaper(destination: &str) {
     copy_prefix(Path::new("/data/system/users/0"), "wallpaper", dest);
 }
 
-pub fn restore_wallpaper(source: &str) {
+/// Restore the wallpaper files, and say whether anything was placed.
+///
+/// False means the archive held no wallpaper this build could place, or the
+/// copy failed. The caller has to be able to tell that apart from "done",
+/// because the wallpaper on the device is then the OLD one and the user is
+/// looking at a restore that quietly did nothing.
+pub fn restore_wallpaper(source: &str) -> bool {
     let from = Path::new(source);
     let to = Path::new("/data/system/users/0");
+    let mut placed = false;
     if let Ok(entries) = fs::read_dir(from) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let src = entry.path();
             if name.starts_with("wallpaper") && regular_no_symlink(&src) {
-                copy_file(&src, &to.join(name));
+                placed |= copy_file(&src, &to.join(name));
             }
         }
     }
@@ -317,6 +369,7 @@ pub fn restore_wallpaper(source: &str) {
     if fallback.is_file() && !primary.exists() {
         let _ = fs::rename(fallback, primary);
     }
+    placed
 }
 
 pub fn backup_bluetooth(destination: &str) {
@@ -335,21 +388,27 @@ pub fn backup_bluetooth(destination: &str) {
     }
 }
 
-pub fn restore_bluetooth(source: &str) {
+/// Restore the Bluetooth pairing data, and say whether it landed.
+///
+/// `bt_config.conf` is the ONLY copy of the user's paired devices and the
+/// pairing keys. A restore that quietly did nothing leaves the phone with
+/// whatever it had, and the user finds out the next time a device fails to
+/// reconnect.
+pub fn restore_bluetooth(source: &str) -> bool {
     let src = Path::new(source).join("bt_config.conf");
     if !regular_no_symlink(&src) {
-        return;
+        return false;
     }
     let dirs = ["/data/misc/bluedroid", "/data/misc/bluetooth"];
     let Some(dir) = dirs.iter().map(Path::new).find(|p| p.is_dir()) else {
-        return;
+        return false;
     };
     let target = dir.join("bt_config.conf");
     protocol::info("Stopping Bluetooth...");
     let _ = status("svc", ["bluetooth", "disable"]);
     let _ = status("cmd", ["bluetooth_manager", "disable"]);
     thread::sleep(Duration::from_secs(1));
-    copy_file(&src, &target);
+    let placed = copy_file(&src, &target);
     let _ = status(
         "chown",
         ["bluetooth:bluetooth", target.to_string_lossy().as_ref()],
@@ -360,6 +419,7 @@ pub fn restore_bluetooth(source: &str) {
     protocol::info("Starting Bluetooth...");
     let _ = status("svc", ["bluetooth", "enable"]);
     let _ = status("cmd", ["bluetooth_manager", "enable"]);
+    placed
 }
 
 fn regular_no_symlink(path: &Path) -> bool {
@@ -395,7 +455,7 @@ fn normalize_prefix(root: &Path, prefix: &str, owner: &str, mode: &str, _context
 
 #[cfg(test)]
 mod wifi_security_tests {
-    use super::{classify_key_mgmt, describe_key_mgmt};
+    use super::{WifiOutcome, classify_key_mgmt, describe_key_mgmt};
 
     /// The encoding AOSP's `WifiConfigStoreUtils.writeBitSet` produces: a hex
     /// string, one character per four bits, MSB first, base64'd.
@@ -581,5 +641,46 @@ mod wifi_security_tests {
                 "an unbounded value reached a log line: {d:?}"
             );
         }
+    }
+
+    /// The counts are the answer the caller acts on, so their arithmetic is
+    /// pinned here rather than left to a run on a device.
+    #[test]
+    fn what_a_wifi_restore_could_not_do_is_counted_not_guessed() {
+        // Nothing to restore is not a failure: an archive with no networks has
+        // restored everything it held.
+        let empty = WifiOutcome::default();
+        assert_eq!(empty.found, 0);
+        assert_eq!(empty.missing(), 0);
+
+        // Everything applied: nothing missing.
+        let all = WifiOutcome {
+            found: 3,
+            added: 3,
+            skipped: 0,
+            failed: 0,
+        };
+        assert_eq!(all.missing(), 0);
+
+        // A network this build cannot classify is MISSING from the device, and
+        // the count has to say so — the caller turns a non-zero count into the
+        // item's failure, and a count that ignored the skip would report a
+        // restore that quietly left the user's home network off the phone.
+        let partial = WifiOutcome {
+            found: 3,
+            added: 2,
+            skipped: 1,
+            failed: 0,
+        };
+        assert_eq!(partial.missing(), 1);
+
+        // A network the device refused is missing too.
+        let refused = WifiOutcome {
+            found: 2,
+            added: 0,
+            skipped: 0,
+            failed: 2,
+        };
+        assert_eq!(refused.missing(), 2);
     }
 }

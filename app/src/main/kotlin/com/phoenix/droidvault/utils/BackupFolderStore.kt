@@ -142,4 +142,56 @@ object BackupFolderStore {
     } catch (_: Exception) {
         null
     }
+
+    /**
+     * The ExternalStorageProvider's own document id for a path, or null.
+     *
+     * The EXACT inverse of [pathFromTreeUri], and it has to be: the two
+     * directions are a name shared between a writer and a reader, and two
+     * copies of a rule drift. `primary` for internal storage, `<volume>` for a
+     * card — the same scheme the provider's own ids use.
+     *
+     * [primaryBase] is passed in rather than read from the platform so the
+     * mapping stays PURE and can be tested off-device: the storage root is
+     * `/storage/emulated/0` on every phone, but the test host has no such
+     * thing.
+     */
+    fun documentIdForPath(path: String, primaryBase: String): String? {
+        val clean = path.trim().trimEnd('/')
+        if (clean.isEmpty()) return null
+        val base = primaryBase.trimEnd('/')
+        if (base.isNotEmpty()) {
+            if (clean.equals(base, ignoreCase = true)) return "primary:"
+            if (clean.startsWith("$base/", ignoreCase = true)) {
+                val rest = clean.substring(base.length + 1)
+                return if (rest.isEmpty()) null else "primary:$rest"
+            }
+        }
+        // A card: /storage/<volume>/<rest>. The volume segment IS the id the
+        // provider uses, which is what pathFromTreeUri reads back.
+        if (!clean.startsWith("/storage/", ignoreCase = true)) return null
+        val rest = clean.substring("/storage/".length)
+        val volume = rest.substringBefore('/')
+        val tail = rest.substringAfter('/', "")
+        if (volume.isEmpty() || tail.isEmpty()) return null
+        return "$volume:$tail"
+    }
+
+    /**
+     * The document URI for a path, for the picker's "open here" hint.
+     *
+     * `EXTRA_INITIAL_URI` is a HINT: Android's documentation is explicit that
+     * it is where the picker should be *displayed* when it loads, that it is not
+     * a restriction, and that a ROM is free to ignore it. So this only ever
+     * changes where the listing opens — the worst case is the behaviour the
+     * picker has today, never a dead end.
+     */
+    fun documentUriForPath(path: String, primaryBase: String): Uri? {
+        val docId = documentIdForPath(path, primaryBase) ?: return null
+        return try {
+            DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", docId)
+        } catch (_: Exception) {
+            null
+        }
+    }
 }

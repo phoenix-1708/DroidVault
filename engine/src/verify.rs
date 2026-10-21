@@ -12,7 +12,7 @@ use crate::checksum;
 use crate::command;
 use crate::manifest;
 use crate::protocol;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 /// One app's archive, as read off disk.
@@ -55,17 +55,26 @@ pub fn scan_apps(base: &Path) -> Vec<ArchiveEntry> {
         }
         let mut parts = Vec::new();
         for (id, names) in [
-            (1u8, ["App.shift"].as_slice()),
-            (
-                2,
-                ["Data.shift", "ExtData.shift", "UserDe.shift"].as_slice(),
-            ),
-            (4, ["Media.shift", "Obb.shift"].as_slice()),
+            (1u8, ["App"].as_slice()),
+            (2, ["Data", "ExtData", "UserDe"].as_slice()),
+            (4, ["Media", "Obb"].as_slice()),
             (3, ["Permissions.txt"].as_slice()),
         ] {
             for name in names {
-                if dir.join(name).is_file() {
-                    parts.push((id, (*name).to_string()));
+                // Resolved under either extension: an archive written before
+                // the extension moved is still this part's archive.
+                let found = if name.ends_with(".txt") {
+                    dir.join(name).is_file().then(|| name.to_string())
+                } else {
+                    crate::vault::existing_archive(&dir, name).map(|p| {
+                        p.file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                };
+                if let Some(name) = found {
+                    parts.push((id, name));
                     break; // Data has three names; report the part once.
                 }
             }
@@ -395,11 +404,41 @@ fn tally_digests(
     (tally, read_back)
 }
 
-/// CLI entry: `--verify-apps <vault path>`.
+/// Parse a package filter for a scoped verification.
+///
+/// The filter is a comma-separated list of package names. An absent or empty
+/// filter means "every app".
+///
+/// A filter that names something that is NOT a package is IGNORED, and the
+/// whole vault is checked instead. **A filter that cannot be read must never
+/// NARROW the check**: a typo would silently skip an archive, and the gate
+/// would then vouch for bytes nobody read — which is the one thing the gate
+/// exists to prevent.
+pub fn parse_package_filter(spec: Option<&str>) -> Option<BTreeSet<String>> {
+    let spec = spec.map(str::trim).filter(|s| !s.is_empty())?;
+    let mut out = BTreeSet::new();
+    for part in spec.split(',') {
+        let p = part.trim();
+        if p.is_empty() || !command::valid_package(p) {
+            protocol::info("Package filter not understood — checking the whole vault");
+            return None;
+        }
+        out.insert(p.to_string());
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// CLI entry: `--verify-apps <vault path> [package,pkg,…]`.
 ///
 /// Reports one line per app and a summary, so the caller can show real results
 /// rather than a bare pass/fail for the whole vault.
-pub fn verify_apps(base_path: &str) -> Result<(), String> {
+///
+/// The optional filter narrows the check to the apps a restore is about to
+/// touch. It exists because the check's cost is the bytes it reads: hashing
+/// every archive in the vault to vouch for eight of them is a full pass over
+/// the vault to answer a question nobody asked — measured on the reference
+/// device, 85 seconds of waiting before an eight-app restore began.
+pub fn verify_apps(base_path: &str, filter_spec: Option<&str>) -> Result<(), String> {
     if !base_path.starts_with('/') || base_path.contains('\n') || base_path.contains('\r') {
         return Err("Invalid backup folder".into());
     }
@@ -411,7 +450,19 @@ pub fn verify_apps(base_path: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let total = apps.len();
+    // Only the apps in the plan are checked. An app whose package cannot be
+    // read is ALWAYS checked: an archive that cannot be identified must not
+    // slip past a gate that is about to restore it.
+    let filter = parse_package_filter(filter_spec);
+    let selected: Vec<&ArchiveEntry> = apps
+        .iter()
+        .filter(|entry| match &filter {
+            None => true,
+            Some(set) => entry.pkg.is_empty() || set.contains(&entry.pkg),
+        })
+        .collect();
+
+    let total = selected.len();
     // What the index already knows was read back. No index, or an unreadable
     // one, simply means nothing is skipped — never that something may be
     // assumed.
@@ -424,7 +475,7 @@ pub fn verify_apps(base_path: &str) -> Result<(), String> {
     let mut read_back: Vec<(String, u64)> = Vec::new();
     let mut refuted: Vec<String> = Vec::new();
     let mut verdicts: Vec<Verdict> = Vec::with_capacity(total);
-    for (index, entry) in apps.iter().enumerate() {
+    for (index, entry) in selected.iter().enumerate() {
         let verdict = verify_app(entry, &base, &known);
         read_back.extend(verdict.read_back.iter().cloned());
         refuted.extend(verdict.refuted.iter().cloned());
@@ -513,7 +564,7 @@ pub fn verify_device(base_path: &str) -> Result<(), String> {
     let mut names: Vec<String> = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".shift"))
+        .filter(|n| crate::vault::is_archive_name(n))
         .collect();
     names.sort();
     let indexed = manifest::read(&base).unwrap_or_default();
@@ -652,7 +703,7 @@ fn device_item_line(name: &str, ok: bool, hash: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{scan_apps, verify_app};
+    use super::{parse_package_filter, scan_apps, verify_app};
 
     /// Unique temp dir per test; no tempfile dependency needed.
     ///
@@ -698,28 +749,113 @@ mod tests {
     }
 
     #[test]
+    fn an_archive_under_the_new_name_is_verified() {
+        // The extension moved from `*.vault` to `*.vault`. The verifier has
+        // to walk the NEW name — that is what a backup writes today — and the
+        // OLD one, because that is what every archive already on a card
+        // carries.
+        let base = tmp("newname");
+        let app = base.join("Apps/User/Drive");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("App.vault"), b"not really an archive").unwrap();
+        fs::write(
+            app.join("Meta.txt"),
+            b"Name=Drive\nPackage=com.google.android.apps.drive\n",
+        )
+        .unwrap();
+
+        let found = scan_apps(&base);
+        assert_eq!(found.len(), 1, "the new name must be walked too");
+        assert_eq!(found[0].label, "Drive");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_archive_under_the_old_name_is_still_verified() {
+        // The other half: an archive written before the extension moved is
+        // still this app's backup, and a verifier that only knew the new name
+        // would report the vault as empty — the user's backups invisible
+        // rather than missing.
+        let base = tmp("oldname");
+        let app = base.join("Apps/User/Drive");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("App.shift"), b"not really an archive").unwrap();
+        fs::write(
+            app.join("Meta.txt"),
+            b"Name=Drive\nPackage=com.google.android.apps.drive\n",
+        )
+        .unwrap();
+
+        let found = scan_apps(&base);
+        assert_eq!(found.len(), 1, "the old name must still be walked");
+        assert_eq!(found[0].label, "Drive");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_directory_without_meta_is_not_reported() {
         // A half-written directory from a killed run must be skipped, not
         // reported as a corrupt archive: it was never a backup to begin with.
         let base = tmp("nometa");
         let app = base.join("Apps/User/Partial");
         fs::create_dir_all(&app).unwrap();
-        fs::write(app.join("App.shift"), b"not really an archive").unwrap();
+        fs::write(app.join("App.vault"), b"not really an archive").unwrap();
 
         assert!(scan_apps(&base).is_empty());
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// The filter that scopes a verification to the plan a restore is about to
+    /// execute. Its whole point is that the check's cost is the bytes it reads:
+    /// hashing every archive in the vault to vouch for eight of them was 85
+    /// seconds of waiting before an eight-app restore began (measured on the
+    /// reference device).
+    #[test]
+    fn a_package_filter_narrows_the_check_to_the_plan() {
+        let parsed = parse_package_filter(Some("com.a.b,com.c.d")).expect("a filter");
+        assert!(parsed.contains("com.a.b"));
+        assert!(parsed.contains("com.c.d"));
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn no_filter_means_every_app() {
+        assert!(parse_package_filter(None).is_none());
+        assert!(parse_package_filter(Some("")).is_none());
+        assert!(parse_package_filter(Some("   ")).is_none());
+    }
+
+    /// A filter that cannot be read must NEVER narrow the check. A typo would
+    /// silently skip an archive, and the gate would then vouch for bytes nobody
+    /// read — the one thing the gate exists to prevent.
+    #[test]
+    fn a_filter_that_does_not_parse_checks_the_whole_vault_instead() {
+        for junk in [
+            "com.a.b,",         // a trailing empty entry
+            ",com.a.b",         // a leading empty entry
+            "com.a.b,,com.c.d", // an empty entry in the middle
+            "com.a b",          // not a package name
+            "com.a.b;rm -rf /", // not a package name, and not a shell
+            "../../etc",        // a path
+            "notapackage",      // no dot: not a package shape
+        ] {
+            assert!(
+                parse_package_filter(Some(junk)).is_none(),
+                "a filter that cannot be read must check everything, not narrow the check: {junk:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_three_data_names_collapse_to_one_part() {
-        // Data.shift, ExtData.shift and UserDe.shift are one logical part.
+        // Data.vault, ExtData.vault and UserDe.vault are one logical part.
         // Reporting three would inflate the part count and make a per-part
         // progress bar claim 5/5 for a 3-part backup.
         let base = tmp("data");
         let app = base.join("Apps/System/App");
         fs::create_dir_all(&app).unwrap();
         fs::write(app.join("Meta.txt"), "Name=App\nPackage=com.x\n").unwrap();
-        for name in ["Data.shift", "ExtData.shift", "UserDe.shift"] {
+        for name in ["Data.vault", "ExtData.vault", "UserDe.vault"] {
             fs::write(app.join(name), b"x").unwrap();
         }
 
@@ -737,7 +873,7 @@ mod tests {
         let app = base.join("Apps/User/App");
         fs::create_dir_all(&app).unwrap();
         fs::write(app.join("Meta.txt"), "Name=App\nPackage=com.x\n").unwrap();
-        for name in ["Permissions.txt", "Media.shift", "Data.shift", "App.shift"] {
+        for name in ["Permissions.txt", "Media.vault", "Data.vault", "App.vault"] {
             fs::write(app.join(name), b"x").unwrap();
         }
 
@@ -758,7 +894,7 @@ mod tests {
         let app = base.join("Apps/User/App");
         fs::create_dir_all(&app).unwrap();
         fs::write(app.join("Meta.txt"), "Name=App\nPackage=com.x\n").unwrap();
-        fs::write(app.join("App.shift"), b"x").unwrap();
+        fs::write(app.join("App.vault"), b"x").unwrap();
 
         let found = scan_apps(&base);
         assert_eq!(found[0].parts.len(), 1);
@@ -779,8 +915,8 @@ mod tests {
     #[test]
     fn a_relative_base_path_is_rejected() {
         // Same guard as app_base(): a relative path escapes the vault.
-        assert!(verify_apps("relative/path").is_err());
-        assert!(verify_apps("bad\npath").is_err());
+        assert!(verify_apps("relative/path", None).is_err());
+        assert!(verify_apps("bad\npath", None).is_err());
         assert!(verify_device("relative").is_err());
     }
 
@@ -843,11 +979,11 @@ mod tests {
 
     #[test]
     fn an_app_with_a_snapshot_and_an_archive_is_healthy() {
-        // The exact on-device shape: App.shift present, Permissions.txt
+        // The exact on-device shape: App.vault present, Permissions.txt
         // present. Both readable means healthy.
         //
         // The archive half of this only means something on a device: placing a
-        // real `.shift` needs `zapdos`, so on the build host `pack_files`
+        // real `.vault` needs `zapdos`, so on the build host `pack_files`
         // produces nothing and the app is checked as snapshot-only. It is left
         // as it is rather than padded with an assertion that would pass on both
         // for different reasons — see `a_marked_part_is_not_read_again_...` for
@@ -860,7 +996,7 @@ mod tests {
         // A minimal real archive via the crate's own writer: pack one file
         // under Apps/User/T so the archive root matches what pack_path uses.
         let src = base.join("Apps/User/T");
-        archive::pack_files(&[src.join("Meta.txt")], &dir.join("App.shift")).ok();
+        archive::pack_files(&[src.join("Meta.txt")], &dir.join("App.vault")).ok();
         let entry = scan_apps(&base)
             .into_iter()
             .next()
@@ -876,7 +1012,7 @@ mod tests {
     /// The permission snapshot is the one part judged by opening it rather than
     /// by running the archive reader, and the reader needs `zapdos`, which only
     /// exists on a device. Using it keeps this test honest on both: an
-    /// `App.shift` here would be a real archive on the device and a file
+    /// `App.vault` here would be a real archive on the device and a file
     /// `pack_files` could not even produce on the host, which is how the
     /// neighbouring archive tests came to pass without checking anything.
     /// Two records of one digest must not be able to disagree.
@@ -891,7 +1027,7 @@ mod tests {
         let base = PathBuf::from(tempdir("device-reconcile"));
         let dir = base.join("Device");
         fs::create_dir_all(&dir).unwrap();
-        let archive = dir.join("Messages.shift");
+        let archive = dir.join("Messages.vault");
         // A skip never looks inside the file, so its contents need not be an
         // archive here: the marker is what decides, and that is the point.
         fs::write(&archive, b"whatever the vault holds").unwrap();
@@ -1137,15 +1273,15 @@ mod tests {
         let dir = base.join("Apps/User/T");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Meta.txt"), "Name=T\nPackage=com.t\n").unwrap();
-        std::fs::write(dir.join("App.shift"), b"not an archive at all").unwrap();
+        std::fs::write(dir.join("App.vault"), b"not an archive at all").unwrap();
         let entry = scan_apps(&base)
             .into_iter()
             .next()
             .expect("scan should see the dir");
         let v = verify_app(&entry, &base, &Default::default());
         assert!(
-            v.corrupt.iter().any(|c| c == "App.shift"),
-            "a bogus .shift must still be reported corrupt, got {:?}",
+            v.corrupt.iter().any(|c| c == "App.vault"),
+            "a bogus .vault must still be reported corrupt, got {:?}",
             v.corrupt
         );
     }
@@ -1176,7 +1312,7 @@ mod tests {
         // `.dvbackup.tar.gz`, so LABEL and PKG are attacker-controlled.
         let hostile = Verdict {
             checked: 2,
-            corrupt: vec!["Data.shift|STATUS:OK".into()],
+            corrupt: vec!["Data.vault|STATUS:OK".into()],
             ..verdict("Evil\nPKG:com.evil|STATUS:OK", "com.evil|STATUS:OK")
         };
         let line = app_line(0, 1, &hostile);
@@ -1220,7 +1356,7 @@ mod tests {
         // order, same spellings the app's parser reads.
         let ordinary = Verdict {
             checked: 5,
-            corrupt: vec!["Data.shift".into()],
+            corrupt: vec!["Data.vault".into()],
             bytes_ok: 4096,
             skipped: 2,
             read_parts: 3,
@@ -1228,7 +1364,7 @@ mod tests {
         };
         let line = app_line(0, 3, &ordinary);
         assert!(line.starts_with("VERIFY_APP|INDEX:1|TOTAL:3|LABEL:Some App|PKG:com.example.app|"));
-        assert!(line.contains("|PARTS:5|CORRUPT:Data.shift|BYTES:4096|STATUS:CORRUPT|"));
+        assert!(line.contains("|PARTS:5|CORRUPT:Data.vault|BYTES:4096|STATUS:CORRUPT|"));
         assert!(line.contains("|SKIPPED:2|READ:3|"));
     }
 
@@ -1243,15 +1379,15 @@ mod tests {
             (true, "unrecorded", "|STATUS:OK|HASH:unrecorded"),
             (false, "unrecorded", "|STATUS:CORRUPT|HASH:unrecorded"),
         ] {
-            let line = device_item_line("Messages\n.shift|STATUS:OK", ok, hash);
+            let line = device_item_line("Messages\n.vault|STATUS:OK", ok, hash);
             assert_eq!(line.lines().count(), 1, "a newline must not split the line");
             assert!(line.contains(expected), "got {line}");
             assert!(!line.contains("\n"));
         }
         // And the app's spelling of an archive with no oddities is untouched.
         assert_eq!(
-            device_item_line("Messages.shift", true, "ok"),
-            "VERIFY_DEVICE_ITEM|NAME:Messages.shift|STATUS:OK|HASH:ok"
+            device_item_line("Messages.vault", true, "ok"),
+            "VERIFY_DEVICE_ITEM|NAME:Messages.vault|STATUS:OK|HASH:ok"
         );
     }
 }

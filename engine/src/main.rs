@@ -21,6 +21,7 @@ mod restore;
 mod targets;
 mod tools;
 mod transfer;
+mod vault;
 mod verify;
 
 fn main() -> ExitCode {

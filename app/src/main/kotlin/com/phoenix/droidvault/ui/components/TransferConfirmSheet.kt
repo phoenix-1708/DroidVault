@@ -17,7 +17,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.phoenix.droidvault.MainViewModel
 import com.phoenix.droidvault.models.ImportSource
 import com.phoenix.droidvault.models.TransferPlan
+import com.phoenix.droidvault.ui.components.DvButton
 
 /**
  * The confirmation in front of an import: the facts, the promise, one button.
@@ -367,7 +367,7 @@ private fun ConfirmRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         TextButton(onClick = onDismiss, shape = CircleShape) { Text("Cancel") }
-        Button(
+        DvButton(
             onClick = onConfirm,
             enabled = confirmEnabled,
             shape = CircleShape,

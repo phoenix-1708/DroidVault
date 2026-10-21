@@ -32,10 +32,17 @@ class AccentContrastTest {
         return (hi + 0.05) / (lo + 0.05)
     }
 
-    /** Surfaces the badges actually sit on, from Color.kt. */
-    private val lightSurface = Color(0xFFF1F5FF)
-    private val darkSurface = Color(0xFF1D1F26)
-    private val amoledSurface = Color(0xFF121216)
+    /**
+     * Surfaces the badges actually sit on, from Color.kt.
+     *
+     * These are the card tones, and they are the TRUTH rather than constants:
+     * the palette changed (the accent left blue and the neutrals lost their
+     * blue cast), the card tones changed with it, and a badge measured
+     * against the old card is a badge measured against nothing.
+     */
+    private val lightSurface = Color(0xFFF1F0EE)
+    private val darkSurface = Color(0xFF1D1C1B)
+    private val amoledSurface = Color(0xFF141414)
 
     @Test
     fun iconOnContainerMeetsAAInLightTheme() {

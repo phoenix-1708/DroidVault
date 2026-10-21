@@ -183,8 +183,29 @@ object SmsViaRoot {
         return seen
     }
 
+    /**
+     * Content signature of one SMS row: address|date|body, NORMALISED.
+     *
+     * The normalisation is not cosmetic. The archive keeps the body exactly as
+     * the store held it, and a network-delivered message can carry a trailing
+     * newline; the WRITE path cannot keep it, because the generated script
+     * decodes the body with `M=$(… | base64 -d)` and a command substitution
+     * strips trailing newlines. So the same message read back from the store
+     * ends in no newline while the archive's copy ends in one, and the two
+     * signatures never match. Measured on the reference device: one archived
+     * message ("…SSC (SR)\n") was re-inserted by every restore — three copies
+     * of one message in a store of eighty — and was then reported as "1
+     * message(s) could not be written" even though the row had landed, because
+     * the read-back compared the same two spellings.
+     *
+     * A trailing newline is not a different message, so both sides are
+     * trimmed before they are compared. ONE implementation, used by the
+     * dedupe and by the read-back: two copies of this rule drift, and the one
+     * that drifts is the one that decides whether a message is "already
+     * there".
+     */
     fun signature(address: Any?, date: Any?, body: Any?): String =
-        "${address ?: ""}|${date ?: ""}|${body ?: ""}"
+        "${address?.toString()?.trim() ?: ""}|${date ?: ""}|${body?.toString()?.trimEnd() ?: ""}"
 
     /**
      * One message, in the shape the generated script needs. Deliberately a
