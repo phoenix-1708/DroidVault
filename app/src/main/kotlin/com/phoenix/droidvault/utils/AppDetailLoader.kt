@@ -58,7 +58,12 @@ object AppDetailLoader {
     suspend fun load(context: Context, app: AppInfo, savedPath: String): AppDetail =
         withContext(Dispatchers.IO) {
             val sysType = if (app.isSystem) "System" else "User"
-            val dir = File("$savedPath/Apps/$sysType/${app.label}")
+            // The folder is named by the SANITISED label — the same function
+            // every writer and every reader resolves the vault with. A raw
+            // label read the wrong folder for any app whose name needed
+            // sanitising (`Tachiyomi: Mangakakalot`), so its parts page showed
+            // "nothing backed up" for an archive that was on the phone.
+            val dir = File("$savedPath/Apps/$sysType/${ShellQuote.safeLabel(app.label)}")
             val parts = PART_FILES.map { (name, base) ->
                 // The name that is actually there, under either extension.
                 val file = if (base.endsWith(".txt")) {

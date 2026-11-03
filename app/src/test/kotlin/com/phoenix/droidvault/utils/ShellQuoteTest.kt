@@ -124,8 +124,11 @@ class ShellQuoteTest {
     @Test fun safeLabelKeepsLegitNames() {
         assertEquals("Telegram", ShellQuote.safeLabel("Telegram"))
         assertEquals("My App (2024)", ShellQuote.safeLabel("My App (2024)"))
-        // Trailing dots are legal in a directory name; leading dots are not.
-        assertEquals("App...", ShellQuote.safeLabel("App..."))
         assertEquals("App", ShellQuote.safeLabel("...App"))
+        // Trailing dots ARE legal in a directory name on this phone and were
+        // kept for that reason. They are not legal on Windows or FAT, and the
+        // vault has to survive the trip to a laptop and back — so the dot goes
+        // (`LabelFolderNameTest` holds the measured storage rules).
+        assertEquals("App", ShellQuote.safeLabel("App..."))
     }
 }

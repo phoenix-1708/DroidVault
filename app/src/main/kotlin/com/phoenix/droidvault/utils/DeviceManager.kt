@@ -19,6 +19,7 @@ import androidx.core.net.toUri
 import com.phoenix.droidvault.models.DeviceArchiveInfo
 import com.phoenix.droidvault.models.DeviceArchiveReader
 import com.phoenix.droidvault.models.DeviceDataItem
+import com.phoenix.droidvault.models.MessageRestoreSummary
 import com.phoenix.droidvault.models.VaultArchive
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.Dispatchers
@@ -683,7 +684,9 @@ object DeviceManager {
     private fun restoreSms(
         context: Context,
         reader: JsonReader,
-        onProgress: (String) -> Unit
+        onProgress: (String) -> Unit,
+        /** (restored, already present) — the item's summary counts both stores. */
+        onCount: (Int, Int) -> Unit = { _, _ -> }
     ): String? {
         Log.d("DeviceManager", "Starting SMS restoration...")
         // Column set comes from the snapshot: the archive may have been written
@@ -719,6 +722,32 @@ object DeviceManager {
         // thing that lied about the 18 colon-bearing messages.
         val staged = HashSet<String>()
         val seen = existingSmsSignatures(context)
+        // Which path writes this run's rows. Null until the first batch decides
+        // it — see flushSmsBatch below for why the decision is made on a real
+        // row rather than up front from a permission check.
+        var writePath: Boolean? = null
+        // Writes one batch and answers how many rows landed. The provider path
+        // does the same work from inside this process; the root path is kept
+        // whole as the fallback, because a user who declined the SMS permission
+        // and a ROM that gates the provider on the default-SMS role both end up
+        // there, and neither may turn into a restore that writes nothing.
+        fun flushSmsBatch(rows: MutableList<ContentValues>): Int {
+            if (rows.isEmpty()) return 0
+            if (writePath == null) {
+                writePath = probeSmsProvider(context, rows)
+                // The probe inserted this batch's first row when it returned
+                // true, and removed it from the batch, so it is counted here
+                // rather than quietly missing from the reported total.
+                if (writePath == true) count++
+                // A one-row tail batch is entirely consumed by the probe.
+                if (rows.isEmpty()) return 0
+            }
+            return if (writePath == true) {
+                flushBatch(context, Telephony.Sms.CONTENT_URI, rows)
+            } else {
+                SmsViaRoot.insertRows(context.filesDir, rows) {}
+            }
+        }
         try {
             reader.beginArray()
             val batch = mutableListOf<ContentValues>()
@@ -788,13 +817,13 @@ object DeviceManager {
             // every SMS row).
             batch.add(values)
             if (batch.size >= 50) {
-                count += SmsViaRoot.insertRows(context.filesDir, batch) {}
+                count += flushSmsBatch(batch)
                 onProgress("Restoring Messages ($count)...")
                 batch.clear()
             }
             }
             reader.endArray()
-            if (batch.isNotEmpty()) count += SmsViaRoot.insertRows(context.filesDir, batch) {}
+            if (batch.isNotEmpty()) count += flushSmsBatch(batch)
             // Ask the store, not the CLI. A rejected `--bind` is reported by the
             // CLI as usage text while it still exits 0, so `count` alone claimed
             // success for rows that were never written — the reported number is
@@ -815,6 +844,7 @@ object DeviceManager {
                 "SMS dedupe result: $processed archive rows, $dupes duplicates, $attempted staged"
             )
             Log.d("DeviceManager", "SMS restoration completed. Restored $count SMS ($dupes duplicates skipped).")
+            onCount(count, dupes)
             onProgress(
                 when {
                     failed > 0 -> "Restored $count Messages ($dupes duplicates skipped, $failed failed)."
@@ -859,6 +889,55 @@ object DeviceManager {
             }
         }
         return -1
+    }
+
+    /**
+     * Decide, once per restore, whether this process may write the SMS store.
+     *
+     * `SmsViaRoot.insertRows` spawns one `content` process per message, and a
+     * `content` invocation bootstraps a JVM before it does anything: measured on
+     * the reference device (Android 17, HyperOS) at **~1000 ms per call, against
+     * ~17 ms for a base64 decode**, and identical for `content://settings`,
+     * `content://sms` and `content://call_log` — so the cost is the process, not
+     * the provider. A 96-message restore spent 96 of its 104 seconds starting
+     * processes, and an inbox of 2,000 messages would have spent half an hour.
+     * From inside this process the same inserts complete in a transaction, and
+     * the app already holds `WRITE_SMS` (the onboarding permission screen asks
+     * for it, and it is the permission the platform gates the provider on).
+     *
+     * The decision is made by WRITING one row, not by reading a permission: a
+     * grant that looks right and a provider that still refuses are different
+     * things, and this project has already been burned twice by trusting a
+     * check instead of the operation (§4.48 — `pm install` exiting 0, `Success`
+     * from `request-unarchive`). The row is a real message from this batch,
+     * inserted atomically, and it is removed from the batch only after the
+     * provider hands back a URI — so a refusal costs nothing and can never
+     * become a duplicate.
+     *
+     * Returns true when the provider wrote the row (and the batch is now one row
+     * shorter), false when this run must use the root path.
+     */
+    private fun probeSmsProvider(context: Context, batch: MutableList<ContentValues>): Boolean {
+        val trial = batch.firstOrNull() ?: return false
+        return try {
+            if (context.contentResolver.insert(Telephony.Sms.CONTENT_URI, trial) != null) {
+                batch.removeAt(0)
+                DroidVaultLogger.i("DeviceData", "SMS write path: provider (in-process)")
+                true
+            } else {
+                DroidVaultLogger.w(
+                    "DeviceData",
+                    "SMS write path: root CLI (provider accepted the insert and returned no row)"
+                )
+                false
+            }
+        } catch (e: Exception) {
+            DroidVaultLogger.w(
+                "DeviceData",
+                "SMS write path: root CLI (provider refused: ${e.javaClass.simpleName})"
+            )
+            false
+        }
     }
 
     private fun flushBatch(context: Context, uri: Uri, batch: List<ContentValues>): Int {
@@ -1287,7 +1366,9 @@ object DeviceManager {
         context: Context,
         reader: JsonReader,
         partsDir: File,
-        onProgress: (String) -> Unit
+        onProgress: (String) -> Unit,
+        /** (restored, already present) — the item's summary counts both stores. */
+        onCount: (Int, Int) -> Unit = { _, _ -> }
     ) {
         Log.d("DeviceManager", "Starting MMS restoration...")
         val selfSuffixes = getSelfNumbers(context).toMutableSet()
@@ -1517,9 +1598,13 @@ object DeviceManager {
         }
         reader.endArray()
         Log.d("DeviceManager", "MMS restoration completed. Restored $count MMS ($dupes duplicates skipped).")
+        onCount(count, dupes)
+        // Named for what it counted: this pass restores picture messages, and the
+        // item's own summary (MessageRestoreSummary, emitted once both stores are
+        // done) is the line that answers "how many Messages came back".
         onProgress(
-            if (dupes > 0) "Restored $count Messages ($dupes duplicates skipped)."
-            else "Restored $count Messages."
+            if (dupes > 0) "Restored $count picture messages ($dupes already there)."
+            else "Restored $count picture messages."
         )
     }
 
@@ -2336,6 +2421,12 @@ object DeviceManager {
                     reclaimCacheDir(context, "messages.json", "mms_parts")
                     val msgJ = File(context.cacheDir, "messages.json")
                     var smsRestoreError: String? = null
+                    // The item's two stores each report their own counts; the
+                    // line that answers "how many Messages came back" is emitted
+                    // once, after both, because the last pass to speak used to be
+                    // the one the user read (§4.53).
+                    var restored = 0
+                    var alreadyPresent = 0
                     if (msgJ.exists()) {
                         msgJ.inputStream().use { fis ->
                             val reader =
@@ -2343,18 +2434,34 @@ object DeviceManager {
                             while (reader.hasNext()) {
                                 when (reader.nextName()) {
                                     "sms" -> smsRestoreError =
-                                        restoreSms(context, reader) { msg -> notify(msg, 10) }
+                                        restoreSms(
+                                            context,
+                                            reader,
+                                            { msg -> notify(msg, 10) }
+                                        ) { count, dupes ->
+                                            restored += count
+                                            alreadyPresent += dupes
+                                        }
+
                                     "mms" -> restoreMms(
                                         context,
                                         reader,
-                                        File(context.cacheDir, "mms_parts")
-                                    ) { msg -> notify(msg, 40) }
+                                        File(context.cacheDir, "mms_parts"),
+                                        { msg -> notify(msg, 40) }
+                                    ) { count, dupes ->
+                                        restored += count
+                                        alreadyPresent += dupes
+                                    }
 
                                     else -> reader.skipValue()
                                 }
                             }
                             reader.endObject(); reader.close()
                         }
+                        notify(
+                            MessageRestoreSummary.of(restored, alreadyPresent),
+                            100
+                        )
                     } else {
                         // The archive extracted to NOTHING — the exact "restore
                         // reported success, wrote nothing" case. Report it

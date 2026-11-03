@@ -2,6 +2,7 @@ package com.phoenix.droidvault
 
 import android.content.Context
 import androidx.core.content.edit
+import com.phoenix.droidvault.models.VaultIndexPaths
 import com.phoenix.droidvault.utils.DroidVaultLogger
 import com.phoenix.droidvault.utils.ShellQuote
 import com.topjohnwu.superuser.Shell
@@ -45,6 +46,24 @@ import kotlinx.coroutines.withTimeoutOrNull
  *  - and NOTHING in the trash: a quarantined archive keeps the name it was
  *    deleted under, and the trash's own manifest records that name.
  *
+ * ## The folder names, for the same reason
+ *
+ * A backup folder is named after its app's label, and a label such as
+ * `Tachiyomi: Mangakakalot` used to name the folder with its colon in it.
+ * Android's `/sdcard` FUSE policy refuses `: * ? < > | " \` to every writer
+ * that is not root, so such a folder could be read off the phone and never put
+ * back: `adb push` aborts on the first one (measured with 35 of the reference
+ * vault's 112 folders, which stopped the other 33.7 GB going back too) and a
+ * `tar` extracting as the shell uid fails file by file. `ShellQuote.safeLabel`
+ * no longer produces them (`§4.79`), and this pass renames the folders a
+ * previous version already wrote — only the ones whose name the function
+ * changes, so a vault with portable names is not touched at all.
+ *
+ * It follows the same three rules as the archive rename: never over an
+ * existing folder (that one is another app's backup), rewrite the index so the
+ * read-back markers survive, and treat the trash as quarantined — an undo that
+ * puts an old-named folder back is renamed by the next launch.
+ *
  * ## Why a read waits for it
  *
  * A rename is atomic, so a reader sees the file under one name or the other —
@@ -57,6 +76,23 @@ object VaultExtensionMigration {
 
     private const val PREFS_NAME = "droidvault_prefs"
     private const val DONE = "vault_extension_renamed_v1"
+
+    /**
+     * Marker for the folder-name pass. Separate from [DONE]: the two renames
+     * are independent, and a vault whose extensions are already tidy must not
+     * skip the folders.
+     */
+    private const val FOLDERS_DONE = "vault_folders_renamed_v1"
+
+    /** The engine's index header (`manifest.rs`, `HEADER`). */
+    private const val VAULT_MANIFEST_HEADER = "DROIDVAULT-MANIFEST|2"
+
+    /**
+     * Printed before an area's folder listing, so a read that never ran is not
+     * mistaken for an area with nothing in it. A `|` cannot appear in a backup
+     * folder's name, so no folder can pass for this.
+     */
+    private const val AREA_CANARY = "DroidVault|area"
 
     /**
      * How long a read may wait for the rename.
@@ -110,10 +146,28 @@ object VaultExtensionMigration {
     fun run(context: Context, vaultPath: String) {
         try {
             migrate(context, vaultPath)
+            renameFolders(context, vaultPath, force = false)
         } finally {
             // Whatever happened, the reads stop waiting: a stuck migration
             // must not hold the app's first answer.
             settled.complete(Unit)
+        }
+    }
+
+    /**
+     * Rename folders that carry a name the storage refuses, now.
+     *
+     * Called after an import: the transfer file carries the folder names of
+     * whatever vault produced it, and an archive written by an older version
+     * carries the old names. The one-shot marker is ignored here, because an
+     * import can put old-named folders back after this launch already tidied
+     * the vault.
+     */
+    fun renameFoldersNow(context: Context, vaultPath: String) {
+        try {
+            renameFolders(context, vaultPath, force = true)
+        } catch (e: Exception) {
+            DroidVaultLogger.d("Vault", "folder rename after import failed: ${e.message}")
         }
     }
 
@@ -221,4 +275,287 @@ object VaultExtensionMigration {
         ).exec()
         return done.isSuccess
     }
+
+    // ------------------------------------------------------- folder names
+
+    /**
+     * Rename every backup folder whose name a copy cannot carry.
+     *
+     * The marker is written only once nothing is left to rename, so a launch
+     * that could not finish (no root yet, a vault on a read-only volume)
+     * retries next time. Idempotent in any case: the second run finds no move
+     * to plan.
+     */
+    private fun renameFolders(context: Context, vaultPath: String, force: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!force && prefs.getBoolean(FOLDERS_DONE, false)) return
+        try {
+            ShellQuote.requireAbsPath(vaultPath)
+        } catch (_: Exception) {
+            DroidVaultLogger.d("Vault", "folder rename skipped: the vault path is not usable")
+            return
+        }
+        val planned = planFolderRenames(vaultPath)
+        val moved = if (planned.isEmpty()) emptyMap() else applyFolderRenames(vaultPath, planned)
+        // The index follows the DISK, in every launch, including one that had
+        // nothing left to rename — a pass that renamed 15 of 35 folders used to
+        // leave those 15 entries naming folders that no longer existed, and no
+        // later launch ever looked at them again.
+        if (!repairIndex(context, vaultPath)) {
+            DroidVaultLogger.w(
+                "Vault",
+                "folder rename: the vault index could not be repaired — retrying next launch"
+            )
+            return
+        }
+        val left = planFolderRenames(vaultPath)
+        if (left.isNotEmpty()) {
+            DroidVaultLogger.w(
+                "Vault",
+                "folder rename incomplete: ${left.size} folder(s) still carry a name the storage " +
+                    "refuses (${left.keys.take(3).joinToString(", ")}) — " +
+                    "renamed ${moved.size} of ${planned.size}; retrying next launch"
+            )
+            return
+        }
+        if (moved.isNotEmpty()) {
+            DroidVaultLogger.i(
+                "Vault",
+                "renamed ${moved.size} backup folder(s) so the vault can be copied off the phone"
+            )
+        }
+        prefs.edit { putBoolean(FOLDERS_DONE, true) }
+    }
+
+    /**
+     * The folders that need renaming, as `old vault-relative path → new`.
+     *
+     * The new name comes from this folder's CURRENT name rather than from a
+     * label read anywhere else: the name on disk is what a reader resolves, so
+     * only a name that is actually there is renamed. `safeLabel` is idempotent,
+     * which is what makes that safe — a folder named `AB DM` comes back as
+     * `AB DM` and is not touched.
+     */
+    private fun planFolderRenames(vaultPath: String): Map<String, String> {
+        val moves = linkedMapOf<String, String>()
+        for (area in listOf("Apps/User", "Apps/System")) {
+            val listed = Shell.cmd("ls -1 ${ShellQuote.q("$vaultPath/$area")} 2>/dev/null").exec()
+            for (raw in listed.out) {
+                val name = raw.trim()
+                if (name.isEmpty()) continue
+                val portable = ShellQuote.safeLabel(name)
+                if (portable != name) moves["$area/$name"] = "$area/$portable"
+            }
+        }
+        return moves
+    }
+
+    /**
+     * Run the renames, one shell call at a time, and report which ones happened.
+     *
+     * **One rename per call, as a single-line command.** The first version sent
+     * all 35 renames as one multi-line `if/elif/mv/fi` script and only about
+     * fifteen took effect — with no `EXISTS` and no failure: the remaining
+     * lines simply never ran, and the vault was left half renamed (the log said
+     * so, and the next launch finished the job). `mv` on this vault measured
+     * 20 ms, so it was not the work; a multi-line command string is not
+     * something this shell path preserves reliably. One call per rename makes
+     * the answer the rename's own exit status, which is also what a field
+     * report can be read from.
+     *
+     * The answer is the shell's own per-folder one, never "the script ran": a
+     * folder whose new name is taken is SKIPPED and stays as it was, because
+     * the folder already under that name is another app's backup and moving
+     * over it would put one app's data under another app's name.
+     */
+    private fun applyFolderRenames(
+        vaultPath: String,
+        moves: Map<String, String>
+    ): Map<String, String> {
+        val moved = linkedMapOf<String, String>()
+        for ((from, to) in moves) {
+            val old = ShellQuote.q("$vaultPath/$from")
+            val new = ShellQuote.q("$vaultPath/$to")
+            // `[ -e ]` before `mv`, never `mv -f`: the destination may be
+            // another app's backup. `mv -n` is not enough — it exits 0 having
+            // done nothing, which reads as a rename that happened.
+            val run = Shell.cmd(
+                "if [ -e $new ]; then echo EXISTS; else mv $old $new 2>&1; fi"
+            ).exec()
+            val said = run.out.joinToString(" ").trim()
+            when {
+                said.contains("EXISTS") -> DroidVaultLogger.w(
+                    "Vault",
+                    "folder rename skipped, the name is already taken: $to"
+                )
+                run.isSuccess -> moved[from] = to
+                else -> {
+                    // The command's own status is not the answer. One rename in
+                    // 35 came back non-zero while the folder HAD moved — the
+                    // same session that silently dropped the tail of the old
+                    // multi-line script. Ask the vault.
+                    val stillThere = Shell.cmd("[ -e $old ] && echo HERE").exec()
+                    if (!stillThere.out.any { it.trim() == "HERE" }) {
+                        DroidVaultLogger.d(
+                            "Vault",
+                            "folder rename status disagreed with the vault; the rename landed: $from"
+                        )
+                        moved[from] = to
+                    } else {
+                        DroidVaultLogger.w(
+                            "Vault",
+                            "folder rename failed: $from -> $to" +
+                                (if (said.isEmpty()) "" else " ($said)")
+                        )
+                    }
+                }
+            }
+        }
+        return moved
+    }
+
+    /**
+     * Point the index's entry paths at the folders that are actually on disk.
+     *
+     * ## Why this is derived from the DISK and not from a list of moves
+     *
+     * The obvious version passes this pass's own `moved` map, and it is wrong
+     * in the case that actually happened: a launch that renamed 15 of 35
+     * folders rewrote those 15 entries and returned. The next launch renamed
+     * the rest and rewrote *its* entries — leaving the 15 from the first launch
+     * naming folders that no longer existed, because nothing ever looked at the
+     * whole index again. A repair that only knows about one pass can never fix
+     * a pass that has already gone by.
+     *
+     * So the question asked here is the one that always has the same answer:
+     * *which entry paths name a folder that is not there, whose portable name
+     * IS there?* That is readable from the disk alone, so a stale index from
+     * any earlier launch is repaired by the same pass, and running it again
+     * finds nothing to do.
+     *
+     * ## The two reads that must not be mistaken for "nothing to do"
+     *
+     * The index is pulled to a private copy rather than read from the shell's
+     * stdout, and the disk listing is required for both areas. A `cat` through
+     * this root session at start-up can come back empty (that same session also
+     * dropped the tail of a 35-line rename script), and an empty read looks
+     * exactly like "no entries". The first version of this method did read the
+     * stdout, and it silently did nothing: 99 entries in the reference vault
+     * kept the old paths while the migration reported success.
+     *
+     * Every write is a temp plus a rename, through the root shell: direct file
+     * I/O into the vault returns EPERM once a root `mv` has touched the
+     * directory (invariant 12). The verdict is the size that landed, not the
+     * command's exit status.
+     */
+    private fun repairIndex(context: Context, vaultPath: String): Boolean {
+        val index = "$vaultPath/vault-manifest.txt"
+        val pulled = java.io.File(context.cacheDir, "droidvault_manifest_paths.txt")
+        val pushed = java.io.File(context.cacheDir, "droidvault_manifest_paths.new")
+        val pulledPath = ShellQuote.q(pulled.absolutePath)
+        try {
+            val pull = Shell.cmd(
+                "rm -f $pulledPath && cat ${ShellQuote.q(index)} > $pulledPath"
+            ).exec()
+            if (!pull.isSuccess) return false
+            if (!pulled.exists() || pulled.length() == 0L) {
+                // A vault that has never been verified has no index yet, and
+                // there is no marker to carry.
+                DroidVaultLogger.d("Vault", "folder rename: there is no vault index to repair yet")
+                return true
+            }
+            val current = try {
+                pulled.readText()
+            } catch (e: Exception) {
+                DroidVaultLogger.w("Vault", "folder rename: the index copy could not be read: ${e.message}")
+                return false
+            }
+            // The manifest's own header, or this is not the file it claims.
+            if (!current.startsWith(VAULT_MANIFEST_HEADER)) {
+                DroidVaultLogger.w("Vault", "folder rename: the index copy is not an index")
+                return false
+            }
+            val onDisk = existingFolderNames(vaultPath) ?: return false
+            val moves = linkedMapOf<String, String>()
+            for (entryPath in VaultIndexPaths.entryPaths(current)) {
+                val folder = VaultIndexPaths.folderOf(entryPath) ?: continue
+                if (folder in onDisk) continue
+                val portable = folder.substringBeforeLast('/') + "/" +
+                    ShellQuote.safeLabel(folder.substringAfterLast('/'))
+                // Only a folder whose portable name is really there: a stale
+                // entry for an app that is no longer in the vault must stay a
+                // stale entry, not be pointed at another app's folder.
+                if (portable != folder && portable in onDisk) moves[folder] = portable
+            }
+            if (moves.isEmpty()) return true
+            val rewritten = VaultIndexPaths.remap(current, moves)
+            if (rewritten == current) return true
+            pushed.writeText(rewritten)
+            pushed.setReadable(false, false)
+            pushed.setReadable(true, true)
+            pushed.setWritable(true, true)
+            val pushedPath = ShellQuote.q(pushed.absolutePath)
+            val tmp = ShellQuote.q("$index.dirs")
+            val write = Shell.cmd(
+                "cp -p $pushedPath $tmp && chmod 660 $tmp && mv $tmp ${ShellQuote.q(index)}"
+            ).exec()
+            if (!write.isSuccess) return false
+            // The bytes that landed are the bytes we wrote, or the rewrite did
+            // not happen however the command exited.
+            val landed = Shell.cmd("stat -c %s ${ShellQuote.q(index)} 2>/dev/null").exec()
+            val size = landed.out.firstOrNull()?.trim()?.toLongOrNull()
+            if (size != pushed.length()) {
+                DroidVaultLogger.w(
+                    "Vault",
+                    "folder rename: the index landed at ${size ?: "?"} bytes, " +
+                        "expected ${pushed.length()}"
+                )
+                return false
+            }
+            DroidVaultLogger.i(
+                "Vault",
+                "repaired ${moves.size} folder path(s) in the vault index so its " +
+                    "read-back markers still name the archives they were earned on"
+            )
+            return true
+        } finally {
+            pulled.delete()
+            pushed.delete()
+        }
+    }
+
+    /**
+     * The backup folders that exist, as vault-relative paths, or null if the
+     * listing could not be made.
+     *
+     * Null rather than an empty set for a read that FAILED (invariant 58): the
+     * caller would otherwise derive no moves from it and call a broken read a
+     * clean index. Absence is a different answer — the reference vault has no
+     * `Apps/System` at all, because no system app has been backed up — so each
+     * area is listed with a canary the shell reaches only if it ran. The canary
+     * holds a `|`, a character no backup folder can carry, so a folder cannot
+     * pass for it.
+     */
+    private fun existingFolderNames(vaultPath: String): Set<String>? {
+        val names = linkedSetOf<String>()
+        for (area in listOf("Apps/User", "Apps/System")) {
+            // `[ -d ]` first: a missing area is a TRUE answer ("nothing backed
+            // up there"), while a shell that never ran is not an answer at all.
+            val listed = Shell.cmd(
+                "echo ${ShellQuote.q(AREA_CANARY)}; " +
+                    "if [ -d ${ShellQuote.q("$vaultPath/$area")} ]; then " +
+                    "ls -1 ${ShellQuote.q("$vaultPath/$area")} 2>/dev/null; fi"
+            ).exec()
+            val out = listed.out.map { it.trim() }
+            if (out.firstOrNull() != AREA_CANARY) {
+                DroidVaultLogger.w("Vault", "folder rename: could not list $area")
+                return null
+            }
+            for (name in out.drop(1)) {
+                if (name.isNotEmpty()) names.add("$area/$name")
+            }
+        }
+        return names
+    }
+
 }

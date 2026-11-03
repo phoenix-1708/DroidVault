@@ -1020,8 +1020,31 @@ android {
         //  - A restore checks only the backups it is about to restore, and the
         //    check runs on four cores. The same eight-app restore went from
         //    85 seconds of silent hashing to 1.6.
-        versionCode = 600000
-        versionName = "4.0.0"
+        //  - The end of a device-data restore says how many messages came back.
+        //    It used to end on "Restored 0 Messages." after a run that had just
+        //    put 94 of them back.
+        //
+        // The message-speed and timing work below was written FOR 4.0.0 and
+        // missed its cut: 4.0.0 shipped from a commit that does not contain it
+        // (checked against the tag, not remembered), so it is listed under 4.0.1
+        // where it actually reaches a user.
+        // 4.0.1 (600001) — the vault can now be copied off the phone and put
+        // back. Three changes in this release.
+        //
+        //  - Backup folders whose app name held a colon — "Tachiyomi:
+        //    Mangakakalot" — are renamed on first launch. Android's storage,
+        //    Windows and most file managers refuse that character, so copying
+        //    the vault back onto a phone stopped at the first such folder and
+        //    left the rest behind. Your backups are the same backups; only the
+        //    folder names change, and the vault's record of which ones were
+        //    verified moves with them.
+        //  - Restoring messages is much faster. It used to start a system
+        //    command for every message; a 96-message restore spent 104 seconds
+        //    doing that, and the same item now takes a quarter of a second.
+        //  - Every backup and restore writes down how long each app and each
+        //    part took, so a slow run can be explained from its own log.
+        versionCode = 600001
+        versionName = "4.0.1"
     }
 
     signingConfigs {

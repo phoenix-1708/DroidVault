@@ -2,6 +2,7 @@ package com.phoenix.droidvault.utils
 
 import android.content.Context
 import android.util.Log
+import com.phoenix.droidvault.VaultExtensionMigration
 import com.phoenix.droidvault.models.EngineEvent
 import com.phoenix.droidvault.models.EngineTransferEvent
 import com.phoenix.droidvault.models.TransferEngine
@@ -1581,6 +1582,12 @@ object VaultTransferManager {
                     VaultTransfer.ConfigsAction.NONE -> Unit
                 }
             }
+            // The transfer carries the folder names of the vault that produced
+            // it, and an archive written by an older version carries names
+            // Android's storage refuses to recreate (`Tachiyomi: Mangakakalot`).
+            // One pass here, before anything lists what landed, so the imported
+            // vault is already one that can be copied off the phone again.
+            VaultExtensionMigration.renameFoldersNow(context, vaultPath)
             Result.Imported(outcome, archive, configsRestored, configsPending, configsReplacedTo)
         } catch (e: Exception) {
             Log.w(TAG, "import failed", e)

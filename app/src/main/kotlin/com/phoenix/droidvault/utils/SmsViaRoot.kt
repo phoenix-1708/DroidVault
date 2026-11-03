@@ -11,22 +11,24 @@ import java.io.File
 /**
  * Root-mediated access to the system SMS store.
  *
- * The app used to READ and WRITE messages through its own ContentResolver, which
- * only works while Droid Vault holds `android.app.role.SMS`. Handing the role
- * back revokes the platform-granted `READ_SMS`/`WRITE_SMS` app-ops, and the
- * platform kills the process as it does — which is why every Messages restore
- * ended with the app disappearing ("killed after restoring").
+ * The app used to READ messages through its own ContentResolver, which only
+ * works while Droid Vault holds `android.app.role.SMS`. Handing the role back
+ * revokes the platform-granted `READ_SMS`/`WRITE_SMS` app-ops, and the platform
+ * kills the process as it does — which is why every Messages restore ended with
+ * the app disappearing ("killed after restoring").
  *
- * Root removes the need for the role entirely, so this object never touches
- * ContentResolver and never asks for the role:
+ * Root removes the need for the role entirely:
  *
  *  - READ: root copies the live `mmssms.db` into app-private storage, chowned to
  *    this app's uid, and we open that snapshot with the platform SQLite that
  *    every app already ships. No bundled native binary, no NDK, and no parsing
  *    of the `content` CLI's unquoted, newline-bearing output.
- *  - WRITE: rows go back through the provider itself (`content insert` as root),
- *    because TelephonyProvider — not us — owns `canonical_addresses`,
- *    `threads` and observer notification. Writing those tables by hand would be
+ *  - WRITE: rows go back through the provider itself — `content insert` as root
+ *    here, or a provider batch from the app's own process when it holds
+ *    `WRITE_SMS` (see `DeviceManager.probeSmsProvider`; measured at ~1000 ms per
+ *    `content` invocation against microseconds for the in-process batch) —
+ *    because TelephonyProvider, not us, owns `canonical_addresses`, `threads`
+ *    and observer notification. Writing those tables by hand would be
  *    version-fragile and produce messages no messaging app displays correctly.
  *
  * Field-verified on the POCO F6 (Android 16): root `content query`/`content
@@ -234,11 +236,18 @@ object SmsViaRoot {
     /**
      * Insert rows through the provider, as root, in ONE shell invocation.
      *
-     * Per-row `content insert` costs ~41 ms measured on-device (the CLI forks
-     * and binds to the provider each call), so the whole batch travels as a
-     * generated script: one `su`, N inserts, one result line. Bodies are
-     * base64'd because message text contains quotes, spaces, semicolons and
-     * newlines — every one of which would otherwise be shell syntax.
+     * A `content` invocation bootstraps a JVM before it does anything — measured
+     * on the reference device (Android 17, HyperOS) at ~1000 ms per call,
+     * identical for `content://settings`, `content://sms` and
+     * `content://call_log`, so the cost is the process and not the provider.
+     * This path therefore exists for the case where the app cannot write the
+     * provider from its own process (no `WRITE_SMS`), and one shell + N inserts
+     * still beats one shell per row. The fast path is the provider batch in
+     * `DeviceManager.probeSmsProvider`.
+     *
+     * Bodies are base64'd because message text contains quotes, spaces,
+     * semicolons and newlines — every one of which would otherwise be shell
+     * syntax.
      *
      * [values] must already have been filtered to columns this provider version
      * accepts; the caller owns that decision.
